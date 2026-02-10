@@ -1,4 +1,4 @@
-from . import auth, cases, config, dashboard, files, health, issues, users, versions
+from . import auth, automation, cases, cicd, config, dashboard, files, health, issues, users, versions
 
 all_routers = [
     health.router,
@@ -8,6 +8,8 @@ all_routers = [
     versions.router,
     cases.router,
     issues.router,
+    automation.router,
+    cicd.router,
     dashboard.router,
     files.router,
 ]

@@ -1,7 +1,14 @@
 import Papa from 'papaparse';
 import type {
+  AutomationFramework,
+  AutomationOperationMode,
+  AutomationRun,
+  AutomationRunStatus,
   CaseDetail,
   CaseWithStatus,
+  CicdPipeline,
+  CicdRun,
+  CicdStage,
   CloseIssuePayload,
   CreateIssuePayload,
   DashboardKpi,
@@ -12,7 +19,12 @@ import type {
   LoginResult,
   ModuleCaseGroup,
   ProjectConfig,
+  SaveAutomationConfigurationPayload,
+  SaveAutomationTestSuitePayload,
+  TriggerAutomationRunPayload,
+  TriggerCicdRunPayload,
   UpdateCaseStatusPayload,
+  UpdateCicdStagePayload,
   User,
   Version,
 } from '../../domain/types';
@@ -115,6 +127,118 @@ function toIssue(row: {
       linkType: link.link_type,
       note: link.note,
     })),
+  };
+}
+
+function toCicdStage(row: {
+  stage_key: string;
+  name: string;
+  description: string;
+  command: string;
+  status: CicdStage['status'];
+  updated_at?: string | null;
+  note?: string | null;
+}): CicdStage {
+  return {
+    stageKey: row.stage_key,
+    name: row.name,
+    description: row.description,
+    command: row.command,
+    status: row.status,
+    updatedAt: row.updated_at ?? undefined,
+    note: row.note ?? undefined,
+  };
+}
+
+function toAutomationFramework(row: {
+  framework_key: string;
+  entry_name: string;
+  display_name: string;
+  framework_type: 'performance' | 'functional';
+  description: string;
+  streamlit_url?: string | null;
+  build_machine: { name: string; ip: string; note: string };
+  deploy_target: { name: string; ip: string; note: string };
+  configurations: {
+    config_key: string;
+    name: string;
+    description: string;
+    content: string;
+    updated_at: string;
+    updated_by: string;
+  }[];
+  test_suites: {
+    suite_key: string;
+    name: string;
+    description: string;
+    content: string;
+    updated_at: string;
+    updated_by: string;
+  }[];
+  operation_modes: {
+    mode: AutomationOperationMode;
+    label: string;
+    description: string;
+  }[];
+  updated_at: string;
+}): AutomationFramework {
+  return {
+    frameworkKey: row.framework_key as AutomationFramework['frameworkKey'],
+    entryName: row.entry_name,
+    displayName: row.display_name,
+    frameworkType: row.framework_type,
+    description: row.description,
+    streamlitUrl: row.streamlit_url ?? undefined,
+    buildMachine: row.build_machine,
+    deployTarget: row.deploy_target,
+    configurations: row.configurations.map((item) => ({
+      configKey: item.config_key,
+      name: item.name,
+      description: item.description,
+      content: item.content,
+      updatedAt: item.updated_at,
+      updatedBy: item.updated_by,
+    })),
+    testSuites: row.test_suites.map((item) => ({
+      suiteKey: item.suite_key,
+      name: item.name,
+      description: item.description,
+      content: item.content,
+      updatedAt: item.updated_at,
+      updatedBy: item.updated_by,
+    })),
+    operationModes: row.operation_modes,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toAutomationRun(row: {
+  run_id: string;
+  framework_key: string;
+  entry_name: string;
+  configuration_key: string;
+  test_suite_key: string;
+  operation_mode: AutomationOperationMode;
+  status: AutomationRunStatus;
+  note?: string | null;
+  triggered_by: string;
+  started_at: string;
+  finished_at?: string | null;
+  logs: string[];
+}): AutomationRun {
+  return {
+    runId: row.run_id,
+    frameworkKey: row.framework_key as AutomationRun['frameworkKey'],
+    entryName: row.entry_name,
+    configurationKey: row.configuration_key,
+    testSuiteKey: row.test_suite_key,
+    operationMode: row.operation_mode,
+    status: row.status,
+    note: row.note ?? undefined,
+    triggeredBy: row.triggered_by,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at ?? undefined,
+    logs: row.logs,
   };
 }
 
@@ -591,5 +715,356 @@ export class HttpRepository implements Repository {
     return this.request<Blob>('GET', `${path}${buildQuery({ version_key: versionKey, format })}`, {
       expectBlob: true,
     });
+  }
+
+  async getCicdPipeline(pipelineKey: string): Promise<CicdPipeline> {
+    const data = await this.request<{
+      pipeline_key: string;
+      pipeline_name: string;
+      project_name: string;
+      binary_name: string;
+      build_machine: { name: string; ip: string; note: string };
+      deploy_target: { name: string; ip: string; note: string };
+      build_script_path: string;
+      artifact_path: string;
+      deploy_path: string;
+      stages_template: {
+        stage_key: string;
+        name: string;
+        description: string;
+        command: string;
+      }[];
+      updated_at: string;
+    }>('GET', `/cicd/pipelines/${encodeURIComponent(pipelineKey)}`);
+
+    return {
+      pipelineKey: data.pipeline_key,
+      pipelineName: data.pipeline_name,
+      projectName: data.project_name,
+      binaryName: data.binary_name,
+      buildMachine: data.build_machine,
+      deployTarget: data.deploy_target,
+      buildScriptPath: data.build_script_path,
+      artifactPath: data.artifact_path,
+      deployPath: data.deploy_path,
+      stagesTemplate: data.stages_template.map((item) => ({
+        stageKey: item.stage_key,
+        name: item.name,
+        description: item.description,
+        command: item.command,
+      })),
+      updatedAt: data.updated_at,
+    };
+  }
+
+  async listCicdRuns(pipelineKey: string): Promise<CicdRun[]> {
+    const data = await this.request<
+      {
+        run_id: string;
+        pipeline_key: string;
+        pipeline_name: string;
+        branch: string;
+        commit_id?: string | null;
+        note?: string | null;
+        status: CicdRun['status'];
+        triggered_by: string;
+        started_at: string;
+        finished_at?: string | null;
+        stages: {
+          stage_key: string;
+          name: string;
+          description: string;
+          command: string;
+          status: CicdStage['status'];
+          updated_at?: string | null;
+          note?: string | null;
+        }[];
+        logs: string[];
+      }[]
+    >('GET', `/cicd/pipelines/${encodeURIComponent(pipelineKey)}/runs`);
+
+    return data.map((item) => ({
+      runId: item.run_id,
+      pipelineKey: item.pipeline_key,
+      pipelineName: item.pipeline_name,
+      branch: item.branch,
+      commitId: item.commit_id ?? undefined,
+      note: item.note ?? undefined,
+      status: item.status,
+      triggeredBy: item.triggered_by,
+      startedAt: item.started_at,
+      finishedAt: item.finished_at ?? undefined,
+      stages: item.stages.map(toCicdStage),
+      logs: item.logs,
+    }));
+  }
+
+  async triggerCicdRun(payload: TriggerCicdRunPayload): Promise<CicdRun> {
+    const data = await this.request<{
+      run_id: string;
+      pipeline_key: string;
+      pipeline_name: string;
+      branch: string;
+      commit_id?: string | null;
+      note?: string | null;
+      status: CicdRun['status'];
+      triggered_by: string;
+      started_at: string;
+      finished_at?: string | null;
+      stages: {
+        stage_key: string;
+        name: string;
+        description: string;
+        command: string;
+        status: CicdStage['status'];
+        updated_at?: string | null;
+        note?: string | null;
+      }[];
+      logs: string[];
+    }>('POST', `/cicd/pipelines/${encodeURIComponent(payload.pipelineKey)}/runs`, {
+      jsonBody: {
+        branch: payload.branch,
+        commit_id: payload.commitId,
+        note: payload.note,
+        triggered_by: payload.triggeredBy,
+      },
+    });
+
+    return {
+      runId: data.run_id,
+      pipelineKey: data.pipeline_key,
+      pipelineName: data.pipeline_name,
+      branch: data.branch,
+      commitId: data.commit_id ?? undefined,
+      note: data.note ?? undefined,
+      status: data.status,
+      triggeredBy: data.triggered_by,
+      startedAt: data.started_at,
+      finishedAt: data.finished_at ?? undefined,
+      stages: data.stages.map(toCicdStage),
+      logs: data.logs,
+    };
+  }
+
+  async updateCicdStage(payload: UpdateCicdStagePayload): Promise<CicdRun> {
+    const data = await this.request<{
+      run_id: string;
+      pipeline_key: string;
+      pipeline_name: string;
+      branch: string;
+      commit_id?: string | null;
+      note?: string | null;
+      status: CicdRun['status'];
+      triggered_by: string;
+      started_at: string;
+      finished_at?: string | null;
+      stages: {
+        stage_key: string;
+        name: string;
+        description: string;
+        command: string;
+        status: CicdStage['status'];
+        updated_at?: string | null;
+        note?: string | null;
+      }[];
+      logs: string[];
+    }>('POST', `/cicd/runs/${encodeURIComponent(payload.runId)}/stages/${encodeURIComponent(payload.stageKey)}:update`, {
+      jsonBody: {
+        status: payload.status,
+        note: payload.note,
+      },
+    });
+
+    return {
+      runId: data.run_id,
+      pipelineKey: data.pipeline_key,
+      pipelineName: data.pipeline_name,
+      branch: data.branch,
+      commitId: data.commit_id ?? undefined,
+      note: data.note ?? undefined,
+      status: data.status,
+      triggeredBy: data.triggered_by,
+      startedAt: data.started_at,
+      finishedAt: data.finished_at ?? undefined,
+      stages: data.stages.map(toCicdStage),
+      logs: data.logs,
+    };
+  }
+
+  async getAutomationFramework(frameworkKey: string): Promise<AutomationFramework> {
+    const data = await this.request<{
+      framework_key: string;
+      entry_name: string;
+      display_name: string;
+      framework_type: 'performance' | 'functional';
+      description: string;
+      streamlit_url?: string | null;
+      build_machine: { name: string; ip: string; note: string };
+      deploy_target: { name: string; ip: string; note: string };
+      configurations: {
+        config_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      test_suites: {
+        suite_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      operation_modes: {
+        mode: AutomationOperationMode;
+        label: string;
+        description: string;
+      }[];
+      updated_at: string;
+    }>('GET', `/automation/frameworks/${encodeURIComponent(frameworkKey)}`);
+
+    return toAutomationFramework(data);
+  }
+
+  async listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]> {
+    const data = await this.request<
+      {
+        run_id: string;
+        framework_key: string;
+        entry_name: string;
+        configuration_key: string;
+        test_suite_key: string;
+        operation_mode: AutomationOperationMode;
+        status: AutomationRunStatus;
+        note?: string | null;
+        triggered_by: string;
+        started_at: string;
+        finished_at?: string | null;
+        logs: string[];
+      }[]
+    >('GET', `/automation/frameworks/${encodeURIComponent(frameworkKey)}/runs`);
+
+    return data.map(toAutomationRun);
+  }
+
+  async saveAutomationConfiguration(payload: SaveAutomationConfigurationPayload): Promise<AutomationFramework> {
+    const data = await this.request<{
+      framework_key: string;
+      entry_name: string;
+      display_name: string;
+      framework_type: 'performance' | 'functional';
+      description: string;
+      streamlit_url?: string | null;
+      build_machine: { name: string; ip: string; note: string };
+      deploy_target: { name: string; ip: string; note: string };
+      configurations: {
+        config_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      test_suites: {
+        suite_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      operation_modes: {
+        mode: AutomationOperationMode;
+        label: string;
+        description: string;
+      }[];
+      updated_at: string;
+    }>(
+      'PUT',
+      `/automation/frameworks/${encodeURIComponent(payload.frameworkKey)}/configurations/${encodeURIComponent(payload.configKey)}`,
+      {
+        jsonBody: {
+          content: payload.content,
+          updated_by: payload.updatedBy,
+        },
+      },
+    );
+
+    return toAutomationFramework(data);
+  }
+
+  async saveAutomationTestSuite(payload: SaveAutomationTestSuitePayload): Promise<AutomationFramework> {
+    const data = await this.request<{
+      framework_key: string;
+      entry_name: string;
+      display_name: string;
+      framework_type: 'performance' | 'functional';
+      description: string;
+      streamlit_url?: string | null;
+      build_machine: { name: string; ip: string; note: string };
+      deploy_target: { name: string; ip: string; note: string };
+      configurations: {
+        config_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      test_suites: {
+        suite_key: string;
+        name: string;
+        description: string;
+        content: string;
+        updated_at: string;
+        updated_by: string;
+      }[];
+      operation_modes: {
+        mode: AutomationOperationMode;
+        label: string;
+        description: string;
+      }[];
+      updated_at: string;
+    }>(
+      'PUT',
+      `/automation/frameworks/${encodeURIComponent(payload.frameworkKey)}/testsuites/${encodeURIComponent(payload.suiteKey)}`,
+      {
+        jsonBody: {
+          content: payload.content,
+          updated_by: payload.updatedBy,
+        },
+      },
+    );
+
+    return toAutomationFramework(data);
+  }
+
+  async triggerAutomationRun(payload: TriggerAutomationRunPayload): Promise<AutomationRun> {
+    const data = await this.request<{
+      run_id: string;
+      framework_key: string;
+      entry_name: string;
+      configuration_key: string;
+      test_suite_key: string;
+      operation_mode: AutomationOperationMode;
+      status: AutomationRunStatus;
+      note?: string | null;
+      triggered_by: string;
+      started_at: string;
+      finished_at?: string | null;
+      logs: string[];
+    }>('POST', `/automation/frameworks/${encodeURIComponent(payload.frameworkKey)}/runs`, {
+      jsonBody: {
+        configuration_key: payload.configurationKey,
+        test_suite_key: payload.testSuiteKey,
+        operation_mode: payload.operationMode,
+        note: payload.note,
+        triggered_by: payload.triggeredBy,
+      },
+    });
+
+    return toAutomationRun(data);
   }
 }

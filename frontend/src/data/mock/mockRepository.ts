@@ -2,8 +2,16 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { getIssueStatusGroup, statusMatchesGroup } from '../../domain/status';
 import type {
+  AutomationFramework,
+  AutomationRun,
+  AutomationRunStatus,
+  AutomationOperationMode,
   CaseDetail,
   CaseWithStatus,
+  CicdPipeline,
+  CicdRun,
+  CicdStage,
+  CicdStageStatus,
   CloseIssuePayload,
   CreateIssuePayload,
   ImportValidationResult,
@@ -13,7 +21,12 @@ import type {
   LoginResult,
   ModuleCaseGroup,
   ProjectConfig,
+  SaveAutomationConfigurationPayload,
+  SaveAutomationTestSuitePayload,
+  TriggerAutomationRunPayload,
+  TriggerCicdRunPayload,
   UpdateCaseStatusPayload,
+  UpdateCicdStagePayload,
   User,
   Version,
 } from '../../domain/types';
@@ -147,6 +160,22 @@ export class MockRepository implements Repository {
       throw new MockRepositoryError('NOT_FOUND', `问题单 ${issueKey} 不存在`);
     }
     return issue;
+  }
+
+  private getCicdRun(runId: string): CicdRun {
+    const run = this.state.cicdRuns.find((item) => item.runId === runId);
+    if (!run) {
+      throw new MockRepositoryError('NOT_FOUND', `流水线运行记录不存在: ${runId}`);
+    }
+    return run;
+  }
+
+  private getAutomationFrameworkState(frameworkKey: string): AutomationFramework {
+    const framework = this.state.automationFrameworks.find((item) => item.frameworkKey === frameworkKey);
+    if (!framework) {
+      throw new MockRepositoryError('NOT_FOUND', `自动化框架不存在: ${frameworkKey}`);
+    }
+    return framework;
   }
 
   private buildCaseWithStatus(versionKey: string): CaseWithStatus[] {
@@ -548,5 +577,212 @@ export class MockRepository implements Repository {
     }
 
     return buildWorkbookBlob(rows, format);
+  }
+
+  async getCicdPipeline(pipelineKey: string): Promise<CicdPipeline> {
+    if (this.state.cicdPipeline.pipelineKey !== pipelineKey) {
+      throw new MockRepositoryError('NOT_FOUND', `流水线不存在: ${pipelineKey}`);
+    }
+    return deepClone(this.state.cicdPipeline);
+  }
+
+  async listCicdRuns(pipelineKey: string): Promise<CicdRun[]> {
+    if (this.state.cicdPipeline.pipelineKey !== pipelineKey) {
+      throw new MockRepositoryError('NOT_FOUND', `流水线不存在: ${pipelineKey}`);
+    }
+    return deepClone(
+      this.state.cicdRuns
+        .filter((item) => item.pipelineKey === pipelineKey)
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
+    );
+  }
+
+  async triggerCicdRun(payload: TriggerCicdRunPayload): Promise<CicdRun> {
+    if (this.state.cicdPipeline.pipelineKey !== payload.pipelineKey) {
+      throw new MockRepositoryError('NOT_FOUND', `流水线不存在: ${payload.pipelineKey}`);
+    }
+
+    const now = new Date().toISOString();
+    const runId = `RUN-${String(this.state.cicdRuns.length + 1).padStart(4, '0')}`;
+    const stages: CicdStage[] = this.state.cicdPipeline.stagesTemplate.map((item, index) => ({
+      ...item,
+      status: index === 0 ? 'running' : 'pending',
+      updatedAt: index === 0 ? now : undefined,
+      note: index === 0 ? '占位：等待真实构建机回调' : undefined,
+    }));
+
+    const run: CicdRun = {
+      runId,
+      pipelineKey: payload.pipelineKey,
+      pipelineName: this.state.cicdPipeline.pipelineName,
+      branch: payload.branch,
+      commitId: payload.commitId,
+      note: payload.note,
+      status: 'running',
+      triggeredBy: payload.triggeredBy,
+      startedAt: now,
+      stages,
+      logs: [`[trigger] ${payload.triggeredBy} 触发流水线，分支 ${payload.branch}`],
+    };
+
+    this.state.cicdRuns.unshift(run);
+    return deepClone(run);
+  }
+
+  async updateCicdStage(payload: UpdateCicdStagePayload): Promise<CicdRun> {
+    const run = this.getCicdRun(payload.runId);
+    const stageIndex = run.stages.findIndex((item) => item.stageKey === payload.stageKey);
+    if (stageIndex < 0) {
+      throw new MockRepositoryError('NOT_FOUND', `阶段不存在: ${payload.stageKey}`);
+    }
+
+    const stage = run.stages[stageIndex];
+    const now = new Date().toISOString();
+    const nextStatus: CicdStageStatus = payload.status;
+    stage.status = nextStatus;
+    stage.updatedAt = now;
+    stage.note = payload.note;
+    run.logs.unshift(`[${stage.stageKey}] ${nextStatus}${payload.note ? ` - ${payload.note}` : ''}`);
+
+    if (nextStatus === 'failed') {
+      run.status = 'failed';
+      run.finishedAt = now;
+      return deepClone(run);
+    }
+
+    if (nextStatus === 'success') {
+      const nextStage = run.stages[stageIndex + 1];
+      if (nextStage && nextStage.status === 'pending') {
+        nextStage.status = 'running';
+        nextStage.updatedAt = now;
+        nextStage.note = '占位：等待手动推进或回调';
+      }
+
+      const allDone = run.stages.every((item) => item.status === 'success');
+      if (allDone) {
+        run.status = 'success';
+        run.finishedAt = now;
+      } else {
+        run.status = 'running';
+        run.finishedAt = undefined;
+      }
+      return deepClone(run);
+    }
+
+    run.status = 'running';
+    run.finishedAt = undefined;
+    return deepClone(run);
+  }
+
+  async getAutomationFramework(frameworkKey: string): Promise<AutomationFramework> {
+    return deepClone(this.getAutomationFrameworkState(frameworkKey));
+  }
+
+  async listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]> {
+    this.getAutomationFrameworkState(frameworkKey);
+    return deepClone(
+      this.state.automationRuns
+        .filter((item) => item.frameworkKey === frameworkKey)
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
+    );
+  }
+
+  async saveAutomationConfiguration(payload: SaveAutomationConfigurationPayload): Promise<AutomationFramework> {
+    const framework = this.getAutomationFrameworkState(payload.frameworkKey);
+    const target = framework.configurations.find((item) => item.configKey === payload.configKey);
+    if (!target) {
+      throw new MockRepositoryError('NOT_FOUND', `配置不存在: ${payload.configKey}`);
+    }
+
+    const now = new Date().toISOString();
+    target.content = payload.content;
+    target.updatedAt = now;
+    target.updatedBy = payload.updatedBy;
+    framework.updatedAt = now;
+    return deepClone(framework);
+  }
+
+  async saveAutomationTestSuite(payload: SaveAutomationTestSuitePayload): Promise<AutomationFramework> {
+    const framework = this.getAutomationFrameworkState(payload.frameworkKey);
+    const target = framework.testSuites.find((item) => item.suiteKey === payload.suiteKey);
+    if (!target) {
+      throw new MockRepositoryError('NOT_FOUND', `测试套不存在: ${payload.suiteKey}`);
+    }
+
+    const now = new Date().toISOString();
+    target.content = payload.content;
+    target.updatedAt = now;
+    target.updatedBy = payload.updatedBy;
+    framework.updatedAt = now;
+    return deepClone(framework);
+  }
+
+  async triggerAutomationRun(payload: TriggerAutomationRunPayload): Promise<AutomationRun> {
+    const framework = this.getAutomationFrameworkState(payload.frameworkKey);
+    const selectedConfig = framework.configurations.find((item) => item.configKey === payload.configurationKey);
+    if (!selectedConfig) {
+      throw new MockRepositoryError('NOT_FOUND', `配置不存在: ${payload.configurationKey}`);
+    }
+    const selectedSuite = framework.testSuites.find((item) => item.suiteKey === payload.testSuiteKey);
+    if (!selectedSuite) {
+      throw new MockRepositoryError('NOT_FOUND', `测试套不存在: ${payload.testSuiteKey}`);
+    }
+    if (!framework.operationModes.some((item) => item.mode === payload.operationMode)) {
+      throw new MockRepositoryError('VALIDATION_ERROR', `不支持的执行模式: ${payload.operationMode}`);
+    }
+
+    const now = new Date().toISOString();
+    const runId = `AUTO-${String(this.state.automationRuns.length + 1).padStart(4, '0')}`;
+
+    const buildLogs = (mode: AutomationOperationMode): string[] => {
+      if (framework.frameworkKey === 'frigateDynamic') {
+        switch (mode) {
+          case 'deploy_pressure_machine':
+            return [
+              '[deploy_pressure_machine] 占位：连接 172.22.67.76 并部署 frigate',
+              '[deploy_pressure_machine] 占位：部署完成，等待下一步动作',
+            ];
+          case 'deploy_hyperchain':
+            return [
+              '[deploy_hyperchain] 占位：上传 hyperchain 二进制到 10.10.33.56 指定目录',
+              '[deploy_hyperchain] 占位：同步配置文件完成',
+            ];
+          case 'deploy_and_test':
+            return [
+              '[deploy_pressure_machine] 占位：部署压力机组件完成',
+              '[deploy_hyperchain] 占位：部署被测 hyperchain 完成',
+              '[test_only] 占位：通过 SSH 在压力机上启动 frigate 压测',
+            ];
+          case 'test_only':
+            return ['[test_only] 占位：跳过部署，直接触发压测任务'];
+          default:
+            return ['[unknown] 占位：未定义执行模式'];
+        }
+      }
+
+      return [
+        '[functional_test] 占位：加载 hypersonic 配置与测试套',
+        '[functional_test] 占位：执行功能回归并生成报告',
+      ];
+    };
+
+    const status: AutomationRunStatus = 'success';
+    const run: AutomationRun = {
+      runId,
+      frameworkKey: framework.frameworkKey,
+      entryName: framework.entryName,
+      configurationKey: payload.configurationKey,
+      testSuiteKey: payload.testSuiteKey,
+      operationMode: payload.operationMode,
+      status,
+      note: payload.note,
+      triggeredBy: payload.triggeredBy,
+      startedAt: now,
+      finishedAt: now,
+      logs: buildLogs(payload.operationMode),
+    };
+
+    this.state.automationRuns.unshift(run);
+    return deepClone(run);
   }
 }

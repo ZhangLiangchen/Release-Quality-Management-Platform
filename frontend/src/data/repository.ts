@@ -1,5 +1,9 @@
 import type {
+  AutomationFramework,
+  AutomationRun,
   CaseDetail,
+  CicdPipeline,
+  CicdRun,
   CloseIssuePayload,
   CreateIssuePayload,
   DashboardKpi,
@@ -10,9 +14,14 @@ import type {
   LoginResult,
   ModuleCaseGroup,
   ProjectConfig,
+  SaveAutomationConfigurationPayload,
+  SaveAutomationTestSuitePayload,
   UpdateCaseStatusPayload,
+  UpdateCicdStagePayload,
+  TriggerAutomationRunPayload,
   User,
   Version,
+  TriggerCicdRunPayload,
 } from '../domain/types';
 
 export interface Repository {
@@ -47,4 +56,15 @@ export interface Repository {
   downloadTemplate(kind: 'cases' | 'issues', format: 'csv' | 'xlsx'): Promise<Blob>;
   validateImport(kind: 'cases' | 'issues', file: File): Promise<ImportValidationResult>;
   exportData(kind: 'cases' | 'issues', format: 'csv' | 'xlsx', versionKey: string): Promise<Blob>;
+
+  getCicdPipeline(pipelineKey: string): Promise<CicdPipeline>;
+  listCicdRuns(pipelineKey: string): Promise<CicdRun[]>;
+  triggerCicdRun(payload: TriggerCicdRunPayload): Promise<CicdRun>;
+  updateCicdStage(payload: UpdateCicdStagePayload): Promise<CicdRun>;
+
+  getAutomationFramework(frameworkKey: string): Promise<AutomationFramework>;
+  listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]>;
+  saveAutomationConfiguration(payload: SaveAutomationConfigurationPayload): Promise<AutomationFramework>;
+  saveAutomationTestSuite(payload: SaveAutomationTestSuitePayload): Promise<AutomationFramework>;
+  triggerAutomationRun(payload: TriggerAutomationRunPayload): Promise<AutomationRun>;
 }

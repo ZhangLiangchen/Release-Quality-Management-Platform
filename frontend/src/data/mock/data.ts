@@ -1,6 +1,10 @@
 import type {
+  AutomationFramework,
+  AutomationRun,
   CaseExecutionHistory,
   CaseStatus,
+  CicdPipeline,
+  CicdRun,
   Issue,
   ProjectConfig,
   TestCase,
@@ -14,6 +18,10 @@ function daysAgo(days: number): string {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function minutesAgo(minutes: number): string {
+  return new Date(now.getTime() - minutes * 60 * 1000).toISOString();
+}
+
 export interface MockDatabase {
   config: ProjectConfig;
   users: User[];
@@ -22,6 +30,10 @@ export interface MockDatabase {
   versionCaseStatus: Record<string, Record<string, CaseStatus>>;
   caseHistory: CaseExecutionHistory[];
   issues: Issue[];
+  cicdPipeline: CicdPipeline;
+  cicdRuns: CicdRun[];
+  automationFrameworks: AutomationFramework[];
+  automationRuns: AutomationRun[];
 }
 
 export function createInitialMockDatabase(): MockDatabase {
@@ -268,6 +280,300 @@ export function createInitialMockDatabase(): MockDatabase {
         createdAt: daysAgo(1),
         updatedAt: daysAgo(1),
         links: [{ caseKey: 'TC-005', linkType: 'repro' }],
+      },
+    ],
+    cicdPipeline: {
+      pipelineKey: 'hyperchain-binary',
+      pipelineName: 'Hyperchain 二进制 CICD',
+      projectName: 'Hyperchain',
+      binaryName: 'hyperchain',
+      buildMachine: {
+        name: '内网构建机',
+        ip: '172.22.67.76',
+        note: '占位信息，后续由你补充构建环境和凭据',
+      },
+      deployTarget: {
+        name: '制品分发机',
+        ip: '10.10.33.56',
+        note: '占位信息，后续补充目标目录和鉴权方式',
+      },
+      buildScriptPath: '/opt/hyperchain/scripts/build_hyperchain.sh',
+      artifactPath: '/opt/hyperchain/output/hyperchain',
+      deployPath: '/data/hyperchain/bin',
+      stagesTemplate: [
+        {
+          stageKey: 'prepare',
+          name: '准备构建环境',
+          description: '连接构建机并准备源码、依赖和环境变量。',
+          command: 'ssh 172.22.67.76 "prepare_env.sh"',
+        },
+        {
+          stageKey: 'build',
+          name: '编译 Hyperchain 二进制',
+          description: '在构建机执行编译脚本，生成可发布二进制。',
+          command: 'ssh 172.22.67.76 "/opt/hyperchain/scripts/build_hyperchain.sh"',
+        },
+        {
+          stageKey: 'package',
+          name: '归档制品',
+          description: '收集并校验编译结果，形成发布制品。',
+          command: 'ssh 172.22.67.76 "sha256sum /opt/hyperchain/output/hyperchain"',
+        },
+        {
+          stageKey: 'scp',
+          name: 'SCP 分发二进制',
+          description: '将二进制通过 scp 发送到目标机器指定目录。',
+          command: 'scp /opt/hyperchain/output/hyperchain user@10.10.33.56:/data/hyperchain/bin/',
+        },
+      ],
+      updatedAt: minutesAgo(30),
+    },
+    cicdRuns: [
+      {
+        runId: 'RUN-0001',
+        pipelineKey: 'hyperchain-binary',
+        pipelineName: 'Hyperchain 二进制 CICD',
+        branch: 'release/v1.0.0',
+        commitId: 'placeholder-commit',
+        note: '初始化占位流水线',
+        status: 'running',
+        triggeredBy: 'qa',
+        startedAt: minutesAgo(20),
+        stages: [
+          {
+            stageKey: 'prepare',
+            name: '准备构建环境',
+            description: '连接构建机并准备源码、依赖和环境变量。',
+            command: 'ssh 172.22.67.76 "prepare_env.sh"',
+            status: 'success',
+            updatedAt: minutesAgo(18),
+            note: '占位：环境检查通过',
+          },
+          {
+            stageKey: 'build',
+            name: '编译 Hyperchain 二进制',
+            description: '在构建机执行编译脚本，生成可发布二进制。',
+            command: 'ssh 172.22.67.76 "/opt/hyperchain/scripts/build_hyperchain.sh"',
+            status: 'running',
+            updatedAt: minutesAgo(5),
+            note: '占位：编译进行中',
+          },
+          {
+            stageKey: 'package',
+            name: '归档制品',
+            description: '收集并校验编译结果，形成发布制品。',
+            command: 'ssh 172.22.67.76 "sha256sum /opt/hyperchain/output/hyperchain"',
+            status: 'pending',
+          },
+          {
+            stageKey: 'scp',
+            name: 'SCP 分发二进制',
+            description: '将二进制通过 scp 发送到目标机器指定目录。',
+            command: 'scp /opt/hyperchain/output/hyperchain user@10.10.33.56:/data/hyperchain/bin/',
+            status: 'pending',
+          },
+        ],
+        logs: [
+          '[prepare] ssh 172.22.67.76: 环境准备完成（占位）',
+          '[build] 执行 build_hyperchain.sh（占位）',
+        ],
+      },
+    ],
+    automationFrameworks: [
+      {
+        frameworkKey: 'frigateDynamic',
+        entryName: '性能测试自动化',
+        displayName: 'frigateDynamic',
+        frameworkType: 'performance',
+        description:
+          'frigateDynamic 负责自动部署压力机上的 frigate 与被测 hyperchain 二进制，并通过 SSH 触发一次性压测作业。',
+        streamlitUrl: 'http://172.22.67.76:8501',
+        buildMachine: {
+          name: '构建/调度机',
+          ip: '172.22.67.76',
+          note: '占位：后续补充 SSH 账号、脚本路径与网络策略',
+        },
+        deployTarget: {
+          name: '被测集群入口',
+          ip: '10.10.33.56',
+          note: '占位：后续补充二进制下发目录、配置目录',
+        },
+        configurations: [
+          {
+            configKey: 'perf-default',
+            name: '默认性能配置',
+            description: '占位配置，用于演示在线编辑与保存',
+            content: [
+              'job_name: frigate_dynamic_perf',
+              'pressure_host: 172.22.67.76',
+              'target_cluster_host: 10.10.33.56',
+              'frigate_package_path: /data/frigate/frigate.tar.gz',
+              'hyperchain_binary_path: /data/hyperchain/bin/hyperchain',
+              'ssh_user: placeholder_user',
+              'ssh_port: 22',
+            ].join('\n'),
+            updatedAt: minutesAgo(12),
+            updatedBy: 'qa',
+          },
+          {
+            configKey: 'perf-long-run',
+            name: '长稳压测配置',
+            description: '用于长时压测的占位参数集',
+            content: [
+              'job_name: frigate_dynamic_long_run',
+              'duration_min: 180',
+              'rps: 1200',
+              'pressure_host: 172.22.67.76',
+              'target_cluster_host: 10.10.33.56',
+            ].join('\n'),
+            updatedAt: minutesAgo(50),
+            updatedBy: 'admin',
+          },
+        ],
+        testSuites: [
+          {
+            suiteKey: 'suite-perf-smoke',
+            name: '性能冒烟套件',
+            description: '快速验证部署与基本负载打通',
+            content: ['suite: perf_smoke', 'scenario: basic_transfer', 'users: 50', 'duration_min: 10'].join('\n'),
+            updatedAt: minutesAgo(11),
+            updatedBy: 'qa',
+          },
+          {
+            suiteKey: 'suite-perf-throughput',
+            name: '吞吐压测套件',
+            description: '压测吞吐与稳定性',
+            content: ['suite: perf_throughput', 'scenario: tx_stress', 'users: 500', 'duration_min: 60'].join('\n'),
+            updatedAt: minutesAgo(35),
+            updatedBy: 'admin',
+          },
+        ],
+        operationModes: [
+          {
+            mode: 'deploy_pressure_machine',
+            label: '单独部署测试机',
+            description: '仅在压力机部署或更新 frigate，不触发压测。',
+          },
+          {
+            mode: 'deploy_hyperchain',
+            label: '单独部署 Hyperchain',
+            description: '仅向被测集群下发 hyperchain 二进制及配置。',
+          },
+          {
+            mode: 'deploy_and_test',
+            label: '一键部署及压测',
+            description: '串行执行部署压力机、部署被测集群并触发压测。',
+          },
+          {
+            mode: 'test_only',
+            label: '仅执行压测',
+            description: '跳过部署步骤，直接通过 SSH 触发 frigate 压测。',
+          },
+        ],
+        updatedAt: minutesAgo(10),
+      },
+      {
+        frameworkKey: 'hypersonic',
+        entryName: '功能测试自动化',
+        displayName: 'hypersonic',
+        frameworkType: 'functional',
+        description: 'hypersonic 用于执行功能回归自动化测试，支持配置与测试套在线维护和触发运行。',
+        buildMachine: {
+          name: '功能测试执行机',
+          ip: '172.22.67.76',
+          note: '占位：后续补充执行入口脚本与运行环境',
+        },
+        deployTarget: {
+          name: '被测服务入口',
+          ip: '10.10.33.56',
+          note: '占位：后续补充服务地址、鉴权与环境变量',
+        },
+        configurations: [
+          {
+            configKey: 'func-default',
+            name: '默认功能配置',
+            description: '基础回归配置',
+            content: [
+              'suite_mode: full_regression',
+              'target_env: testnet',
+              'api_base_url: http://10.10.33.56:8080',
+              'report_dir: /data/hypersonic/report',
+            ].join('\n'),
+            updatedAt: minutesAgo(40),
+            updatedBy: 'qa',
+          },
+          {
+            configKey: 'func-fast',
+            name: '快速回归配置',
+            description: '用于 CI 快速验证',
+            content: ['suite_mode: smoke', 'target_env: testnet', 'parallelism: 4'].join('\n'),
+            updatedAt: minutesAgo(55),
+            updatedBy: 'admin',
+          },
+        ],
+        testSuites: [
+          {
+            suiteKey: 'suite-func-core',
+            name: '核心交易回归',
+            description: '覆盖核心交易与账户流程',
+            content: ['suite: core_tx', 'cases:', '- account/create', '- transfer/basic', '- transfer/rollback'].join(
+              '\n',
+            ),
+            updatedAt: minutesAgo(33),
+            updatedBy: 'qa',
+          },
+          {
+            suiteKey: 'suite-func-contract',
+            name: '合约功能回归',
+            description: '覆盖合约部署、调用、升级流程',
+            content: ['suite: contract_regression', 'cases:', '- contract/deploy', '- contract/invoke', '- contract/upgrade'].join(
+              '\n',
+            ),
+            updatedAt: minutesAgo(80),
+            updatedBy: 'admin',
+          },
+        ],
+        operationModes: [
+          {
+            mode: 'functional_test',
+            label: '执行功能测试',
+            description: '按所选配置与测试套执行功能自动化测试。',
+          },
+        ],
+        updatedAt: minutesAgo(30),
+      },
+    ],
+    automationRuns: [
+      {
+        runId: 'AUTO-0001',
+        frameworkKey: 'frigateDynamic',
+        entryName: '性能测试自动化',
+        configurationKey: 'perf-default',
+        testSuiteKey: 'suite-perf-smoke',
+        operationMode: 'deploy_and_test',
+        status: 'running',
+        note: '占位：夜间冒烟压测',
+        triggeredBy: 'qa',
+        startedAt: minutesAgo(9),
+        logs: [
+          '[deploy_pressure_machine] 占位：已连接压力机 172.22.67.76',
+          '[deploy_hyperchain] 占位：已下发二进制到 10.10.33.56',
+          '[test_only] 占位：已通过 SSH 启动 frigate 压测',
+        ],
+      },
+      {
+        runId: 'AUTO-0002',
+        frameworkKey: 'hypersonic',
+        entryName: '功能测试自动化',
+        configurationKey: 'func-fast',
+        testSuiteKey: 'suite-func-core',
+        operationMode: 'functional_test',
+        status: 'success',
+        note: '占位：每日功能回归',
+        triggeredBy: 'admin',
+        startedAt: minutesAgo(120),
+        finishedAt: minutesAgo(95),
+        logs: ['[functional_test] 占位：执行 42 条用例，42 通过，0 失败'],
       },
     ],
   };

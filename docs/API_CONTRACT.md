@@ -44,6 +44,19 @@
 - `GET /dashboard/quality?version_key=...`
 - `GET /dashboard/issues/pending?version_key=...`
 
+## CICD（Hyperchain 二进制，占位流程）
+- `GET /cicd/pipelines/hyperchain-binary`
+- `GET /cicd/pipelines/hyperchain-binary/runs`
+- `POST /cicd/pipelines/hyperchain-binary/runs`
+- `POST /cicd/runs/{run_id}/stages/{stage_key}:update`
+
+## 自动化测试（性能/功能）
+- `GET /automation/frameworks/{framework_key}`
+- `GET /automation/frameworks/{framework_key}/runs`
+- `PUT /automation/frameworks/{framework_key}/configurations/{config_key}`
+- `PUT /automation/frameworks/{framework_key}/testsuites/{suite_key}`
+- `POST /automation/frameworks/{framework_key}/runs`
+
 ## 附件
 - `POST /files/upload` (multipart/form-data)
 

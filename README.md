@@ -8,6 +8,15 @@
 - Gateway: Nginx
 - Deployment: Docker Compose
 
+## 功能页面
+- `/` 首页看板
+- `/cases` 测试用例集
+- `/issues` 问题单
+- `/cicd` CICD（Hyperchain 二进制占位流程）
+- `/perf-automation` 性能测试自动化（frigateDynamic）
+- `/func-automation` 功能测试自动化（hypersonic）
+- `/settings` 配置中心
+
 ## 目录结构
 - `frontend/`: 前端应用（Phase 1 可用 Mock 数据）
 - `backend/`: 后端 API 与数据库迁移

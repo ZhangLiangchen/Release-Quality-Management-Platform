@@ -1,4 +1,13 @@
-import { DashboardOutlined, SettingOutlined, BugOutlined, CheckSquareOutlined, LogoutOutlined } from '@ant-design/icons';
+import {
+  ExperimentOutlined,
+  DashboardOutlined,
+  SettingOutlined,
+  ThunderboltOutlined,
+  BugOutlined,
+  CheckSquareOutlined,
+  LogoutOutlined,
+  DeploymentUnitOutlined,
+} from '@ant-design/icons';
 import { Button, Layout, Menu, Select, Space, Spin, Tag, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useSession } from '../app/SessionContext';
@@ -10,6 +19,9 @@ const navItems = [
   { key: '/', label: '首页', icon: <DashboardOutlined /> },
   { key: '/cases', label: '测试用例集', icon: <CheckSquareOutlined /> },
   { key: '/issues', label: '问题单', icon: <BugOutlined /> },
+  { key: '/cicd', label: 'CICD', icon: <DeploymentUnitOutlined /> },
+  { key: '/perf-automation', label: '性能测试自动化', icon: <ThunderboltOutlined /> },
+  { key: '/func-automation', label: '功能测试自动化', icon: <ExperimentOutlined /> },
   { key: '/settings', label: '配置中心', icon: <SettingOutlined /> },
 ];
 
@@ -38,18 +50,29 @@ export function AppShell() {
           gap: 16,
         }}
       >
-        <Space size={16}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
           <Text strong style={{ fontSize: 18 }}>
             {config?.projectName ?? '软件质量管理平台'}
           </Text>
-          <Menu
-            mode="horizontal"
-            selectedKeys={selectedKey ? [selectedKey] : []}
-            items={navItems}
-            onClick={({ key }) => navigate(key)}
-            style={{ minWidth: 420, borderBottom: 'none' }}
-          />
-        </Space>
+          <div style={{ flex: 1, minWidth: 0, overflowX: 'auto' }}>
+            <Menu
+              mode="horizontal"
+              selectedKeys={selectedKey ? [selectedKey] : []}
+              items={navItems}
+              onClick={({ key }) => navigate(key)}
+              disabledOverflow
+              style={{ minWidth: 'max-content', borderBottom: 'none' }}
+            />
+          </div>
+        </div>
 
         <Space>
           <Text type="secondary">版本</Text>

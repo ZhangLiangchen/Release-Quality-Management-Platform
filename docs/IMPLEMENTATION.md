@@ -6,8 +6,8 @@
 - Phase 2：FastAPI + PostgreSQL 实际 API
 
 ## 当前实现状态
-- `frontend/`：React + TS + Ant Design，已实现 `/login`、`/`、`/cases`、`/issues`、`/settings`。
-- `backend/`：FastAPI 接口、SQLAlchemy 模型、Alembic 初始迁移、JWT 登录、RBAC、附件上传、CSV/XLSX 导入导出。
+- `frontend/`：React + TS + Ant Design，已实现 `/login`、`/`、`/cases`、`/issues`、`/cicd`、`/perf-automation`、`/func-automation`、`/settings`。
+- `backend/`：FastAPI 接口、SQLAlchemy 模型、Alembic 初始迁移、JWT 登录、RBAC、附件上传、CSV/XLSX 导入导出、CICD 占位接口、自动化测试占位接口。
 - `deploy/`：docker-compose + Nginx 反向代理 + uploads 静态目录映射。
 
 ## 默认账户
@@ -38,3 +38,7 @@
 - 单项目单实例。
 - 顶部版本切换只影响个人视图（前端 localStorage 键：`qms.viewVersionKey`）。
 - 问题单内部细粒度状态，前端按 `all/open/pending/closed/invalid` 状态组展示。
+- CICD 当前先落地 `hyperchain-binary` 占位流程：构建机 `172.22.67.76`，SCP 目标机 `10.10.33.56`，路径与脚本后续可补齐。
+- 自动化测试新增两个入口：
+  - `性能测试自动化`（`frigateDynamic`）：支持选择/编辑 configuration、testsuite、保存、执行；支持单独部署测试机、单独部署 hyperchain、一键部署及压测、仅压测；支持可选 Streamlit iframe 嵌入。
+  - `功能测试自动化`（`hypersonic`）：支持选择/编辑 configuration、testsuite、保存、执行功能自动化测试。

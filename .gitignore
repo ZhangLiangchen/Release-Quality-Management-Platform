@@ -1,0 +1,28 @@
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# Backend
+backend/.venv/
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.coverage
+backend/htmlcov/
+backend/uploads/
+backend/*.db
+backend/*.sqlite3
+
+# Root
+*.log
+.env
+.env.*

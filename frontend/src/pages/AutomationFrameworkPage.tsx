@@ -1,9 +1,8 @@
+import { LinkOutlined } from '@ant-design/icons';
 import {
-  Alert,
   Button,
   Card,
   Col,
-  Descriptions,
   Input,
   Radio,
   Row,
@@ -11,10 +10,11 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from '../app/SessionContext';
 import type {
   AutomationFramework,
@@ -30,6 +30,7 @@ const RUN_STATUS_LABEL: Record<AutomationRunStatus, string> = {
   running: '执行中',
   success: '成功',
   failed: '失败',
+  canceled: '已取消',
 };
 
 const RUN_STATUS_COLOR: Record<AutomationRunStatus, string> = {
@@ -37,12 +38,22 @@ const RUN_STATUS_COLOR: Record<AutomationRunStatus, string> = {
   running: 'processing',
   success: 'success',
   failed: 'error',
+  canceled: 'warning',
 };
 
 interface AutomationFrameworkPageProps {
   frameworkKey: AutomationFramework['frameworkKey'];
   defaultTitle: string;
 }
+
+const PREFERRED_DEFAULT_SELECTION: Partial<
+  Record<AutomationFramework['frameworkKey'], { configKey?: string; suiteKey?: string }>
+> = {
+  frigateDynamic: {
+    configKey: 'whole_config.toml',
+    suiteKey: 'standard.toml',
+  },
+};
 
 function toLocalTime(value?: string): string {
   if (!value) {
@@ -67,6 +78,8 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
   const [configContent, setConfigContent] = useState('');
   const [suiteContent, setSuiteContent] = useState('');
   const [runNote, setRunNote] = useState('');
+  const logCursorByRunIdRef = useRef<Record<string, number>>({});
+  const runLogContainerRef = useRef<HTMLDivElement | null>(null);
 
   const canOperate = user?.role !== 'viewer';
 
@@ -79,16 +92,28 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
       ]);
       setFramework(nextFramework);
       setRuns(nextRuns);
+      nextRuns.forEach((run) => {
+        const previousCursor = logCursorByRunIdRef.current[run.runId] ?? 0;
+        logCursorByRunIdRef.current[run.runId] = Math.max(previousCursor, run.logs.length);
+      });
 
       setSelectedConfigKey((current) => {
         if (current && nextFramework.configurations.some((item) => item.configKey === current)) {
           return current;
+        }
+        const preferredConfigKey = PREFERRED_DEFAULT_SELECTION[nextFramework.frameworkKey]?.configKey;
+        if (preferredConfigKey && nextFramework.configurations.some((item) => item.configKey === preferredConfigKey)) {
+          return preferredConfigKey;
         }
         return nextFramework.configurations[0]?.configKey ?? null;
       });
       setSelectedSuiteKey((current) => {
         if (current && nextFramework.testSuites.some((item) => item.suiteKey === current)) {
           return current;
+        }
+        const preferredSuiteKey = PREFERRED_DEFAULT_SELECTION[nextFramework.frameworkKey]?.suiteKey;
+        if (preferredSuiteKey && nextFramework.testSuites.some((item) => item.suiteKey === preferredSuiteKey)) {
+          return preferredSuiteKey;
         }
         return nextFramework.testSuites[0]?.suiteKey ?? null;
       });
@@ -132,6 +157,84 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
   useEffect(() => {
     setSuiteContent(selectedSuite?.content ?? '');
   }, [selectedSuiteKey, selectedSuite?.content]);
+
+  useEffect(() => {
+    const runId = selectedRun?.runId;
+    if (!runId) {
+      return undefined;
+    }
+
+    if (logCursorByRunIdRef.current[runId] === undefined) {
+      logCursorByRunIdRef.current[runId] = selectedRun.logs.length;
+    }
+
+    let stopped = false;
+    let pulling = false;
+    const pullLogs = async () => {
+      if (pulling || stopped) {
+        return;
+      }
+      pulling = true;
+      try {
+        let continueFetch = true;
+        while (!stopped && continueFetch) {
+          const cursor = logCursorByRunIdRef.current[runId] ?? 0;
+          const chunk = await repository.getAutomationRunLogs(runId, cursor, 400);
+          if (stopped) {
+            return;
+          }
+          logCursorByRunIdRef.current[runId] = chunk.nextCursor;
+          setRuns((prev) =>
+            prev.map((item) =>
+              item.runId === runId
+                ? {
+                    ...item,
+                    status: chunk.status,
+                    finishedAt: chunk.finishedAt,
+                    reportArchivePath: chunk.reportArchivePath,
+                    logs: chunk.lines.length > 0 ? [...item.logs, ...chunk.lines] : item.logs,
+                  }
+                : item,
+            ),
+          );
+
+          continueFetch = chunk.hasMore;
+          if (chunk.lines.length === 0 && !chunk.hasMore) {
+            continueFetch = false;
+          }
+        }
+      } catch (error) {
+        if (!stopped) {
+          console.error(error);
+        }
+      } finally {
+        pulling = false;
+      }
+    };
+
+    void pullLogs();
+    if (selectedRun.status !== 'running' && selectedRun.status !== 'pending') {
+      return () => {
+        stopped = true;
+      };
+    }
+
+    const timer = window.setInterval(() => {
+      void pullLogs();
+    }, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [repository, selectedRun?.runId, selectedRun?.status]);
+
+  useEffect(() => {
+    const container = runLogContainerRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [selectedRunId, selectedRun?.logs.length]);
 
   const saveConfig = async () => {
     if (!framework || !selectedConfigKey || !user) {
@@ -193,6 +296,7 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
         note: runNote.trim() || undefined,
         triggeredBy: user.username,
       });
+      logCursorByRunIdRef.current[created.runId] = created.logs.length;
       setRuns((prev) => [created, ...prev]);
       setSelectedRunId(created.runId);
       setRunNote('');
@@ -204,64 +308,45 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
     }
   };
 
+  const cancelRun = async () => {
+    if (!selectedRun || !canOperate) {
+      return;
+    }
+    if (selectedRun.status !== 'pending' && selectedRun.status !== 'running') {
+      return;
+    }
+
+    try {
+      const updated = await repository.cancelAutomationRun(selectedRun.runId);
+      logCursorByRunIdRef.current[updated.runId] = updated.logs.length;
+      setRuns((prev) =>
+        prev.map((item) => {
+          if (item.runId !== updated.runId) {
+            return item;
+          }
+          return updated;
+        }),
+      );
+      message.success(`已请求取消任务 ${selectedRun.runId}`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '取消任务失败');
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Title level={4} style={{ margin: 0 }}>
-        {framework?.entryName ?? defaultTitle}
-      </Title>
-
-      <Alert
-        type="info"
-        showIcon
-        message="当前为占位集成：路径、脚本、凭据等你后续可在页面内直接编辑后保存。"
-      />
-
-      <Card loading={loading} title="框架基础信息">
-        {framework ? (
-          <Descriptions bordered column={1} size="small">
-            <Descriptions.Item label="入口名称">{framework.entryName}</Descriptions.Item>
-            <Descriptions.Item label="框架名称">{framework.displayName}</Descriptions.Item>
-            <Descriptions.Item label="类型">
-              {framework.frameworkType === 'performance' ? '性能测试自动化' : '功能测试自动化'}
-            </Descriptions.Item>
-            <Descriptions.Item label="说明">{framework.description}</Descriptions.Item>
-            <Descriptions.Item label="调度机">
-              {framework.buildMachine.name} ({framework.buildMachine.ip})
-              <br />
-              <Text type="secondary">{framework.buildMachine.note}</Text>
-            </Descriptions.Item>
-            <Descriptions.Item label="目标机/集群入口">
-              {framework.deployTarget.name} ({framework.deployTarget.ip})
-              <br />
-              <Text type="secondary">{framework.deployTarget.note}</Text>
-            </Descriptions.Item>
-            <Descriptions.Item label="最后更新时间">{toLocalTime(framework.updatedAt)}</Descriptions.Item>
-          </Descriptions>
-        ) : null}
-      </Card>
-
-      {framework?.frameworkType === 'performance' && (
-        <Card title="frigateDynamic Streamlit（可选嵌入）" loading={loading}>
-          {framework.streamlitUrl ? (
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Space>
-                <Text type="secondary">Streamlit 地址</Text>
-                <Tag color="blue">{framework.streamlitUrl}</Tag>
-                <Button size="small" href={framework.streamlitUrl} target="_blank">
-                  新窗口打开
-                </Button>
-              </Space>
-              <iframe
-                title="frigateDynamic-streamlit"
-                src={framework.streamlitUrl}
-                style={{ width: '100%', minHeight: 420, border: '1px solid #f0f0f0', borderRadius: 8 }}
-              />
-            </Space>
-          ) : (
-            <Text type="secondary">未配置 Streamlit 地址，可仅使用当前页面进行图形化编辑与执行。</Text>
-          )}
-        </Card>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <Title level={4} style={{ margin: 0 }}>
+          {framework?.entryName ?? defaultTitle}
+        </Title>
+        {framework?.frameworkType === 'performance' && framework.streamlitUrl && (
+          <Tooltip title={`打开 Streamlit: ${framework.streamlitUrl}`}>
+            <Button icon={<LinkOutlined />} href={framework.streamlitUrl} target="_blank">
+              Streamlit
+            </Button>
+          </Tooltip>
+        )}
+      </div>
 
       <Row gutter={16}>
         <Col xs={24} xl={12}>
@@ -401,13 +486,34 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
         />
 
         {selectedRun && (
-          <Card title={`任务日志 - ${selectedRun.runId}`} size="small" style={{ marginTop: 12 }}>
-            <div style={{ maxHeight: 220, overflowY: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}>
+          <Card
+            title={`任务日志 - ${selectedRun.runId}`}
+            size="small"
+            style={{ marginTop: 12 }}
+            extra={
+              <Space>
+                {selectedRun.reportArchivePath && (
+                  <a href={selectedRun.reportArchivePath} target="_blank" rel="noreferrer">
+                    下载报告
+                  </a>
+                )}
+                {(selectedRun.status === 'pending' || selectedRun.status === 'running') && (
+                  <Button danger size="small" disabled={!canOperate} onClick={() => void cancelRun()}>
+                    取消任务
+                  </Button>
+                )}
+              </Space>
+            }
+          >
+            <div
+              ref={runLogContainerRef}
+              style={{ maxHeight: 220, overflowY: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}
+            >
               {selectedRun.logs.length === 0 ? (
                 <Text type="secondary">暂无日志</Text>
               ) : (
-                selectedRun.logs.map((log) => (
-                  <div key={`${selectedRun.runId}-${log}`} style={{ fontFamily: 'Menlo, monospace', fontSize: 12 }}>
+                selectedRun.logs.map((log, index) => (
+                  <div key={`${selectedRun.runId}-${index}`} style={{ fontFamily: 'Menlo, monospace', fontSize: 12 }}>
                     {log}
                   </div>
                 ))

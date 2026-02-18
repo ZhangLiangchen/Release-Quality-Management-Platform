@@ -1,27 +1,25 @@
 import {
-  Alert,
   Button,
   Card,
   Col,
-  Descriptions,
   Divider,
   Form,
   Input,
   Row,
-  Space,
   Steps,
   Table,
   Tag,
   Typography,
   message,
 } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from '../app/SessionContext';
 import type { CicdPipeline, CicdRun, CicdStage, CicdStageStatus } from '../domain/types';
 
 const { Title, Text, Paragraph } = Typography;
 
 const PIPELINE_KEY = 'hyperchain-binary';
+const RUN_LIST_PAGE_SIZE = 10;
 
 const STAGE_STATUS_LABEL: Record<CicdStageStatus, string> = {
   pending: '待执行',
@@ -77,18 +75,31 @@ function getCurrentStepIndex(stages: CicdStage[]): number {
   return completedCount;
 }
 
+function toLocalTime(value?: string): string {
+  if (!value) {
+    return '-';
+  }
+  return new Date(value).toLocaleString();
+}
+
+function formatStageCommand(command: string): string {
+  return command.replace(/\s&&\s/g, ' &&\n');
+}
+
 export function CicdPage() {
   const { repository, user } = useSession();
   const [pipeline, setPipeline] = useState<CicdPipeline | null>(null);
   const [runs, setRuns] = useState<CicdRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [runListPage, setRunListPage] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [operatingStageKey, setOperatingStageKey] = useState<string | null>(null);
   const [triggerForm] = Form.useForm();
+  const logCursorByRunIdRef = useRef<Record<string, number>>({});
+  const runLogContainerRef = useRef<HTMLDivElement | null>(null);
 
   const canOperate = user?.role !== 'viewer';
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [nextPipeline, nextRuns] = await Promise.all([
@@ -97,24 +108,134 @@ export function CicdPage() {
       ]);
       setPipeline(nextPipeline);
       setRuns(nextRuns);
-
-      if (nextRuns.length === 0) {
-        setSelectedRunId(null);
-      } else if (!selectedRunId || !nextRuns.some((item) => item.runId === selectedRunId)) {
-        setSelectedRunId(nextRuns[0].runId);
-      }
+      nextRuns.forEach((run) => {
+        const previousCursor = logCursorByRunIdRef.current[run.runId] ?? 0;
+        logCursorByRunIdRef.current[run.runId] = Math.max(previousCursor, run.logs.length);
+      });
+      setSelectedRunId((previousSelectedRunId) => {
+        if (nextRuns.length === 0) {
+          return null;
+        }
+        if (!previousSelectedRunId || !nextRuns.some((item) => item.runId === previousSelectedRunId)) {
+          return nextRuns[0].runId;
+        }
+        return previousSelectedRunId;
+      });
     } catch (error) {
       message.error(error instanceof Error ? error.message : '加载 CICD 信息失败');
     } finally {
       setLoading(false);
     }
-  };
+  }, [repository]);
 
   useEffect(() => {
     void loadData();
-  }, []);
+  }, [loadData]);
 
   const selectedRun = useMemo(() => runs.find((item) => item.runId === selectedRunId) ?? null, [runs, selectedRunId]);
+  const totalRunPages = useMemo(() => Math.max(1, Math.ceil(runs.length / RUN_LIST_PAGE_SIZE)), [runs.length]);
+  const pagedRuns = useMemo(() => {
+    const start = (runListPage - 1) * RUN_LIST_PAGE_SIZE;
+    return runs.slice(start, start + RUN_LIST_PAGE_SIZE);
+  }, [runs, runListPage]);
+
+  useEffect(() => {
+    if (runListPage > totalRunPages) {
+      setRunListPage(totalRunPages);
+    }
+  }, [runListPage, totalRunPages]);
+
+  useEffect(() => {
+    if (runs.length === 0) {
+      if (selectedRunId !== null) {
+        setSelectedRunId(null);
+      }
+      return;
+    }
+    if (pagedRuns.length === 0) {
+      return;
+    }
+    if (!selectedRunId || !pagedRuns.some((item) => item.runId === selectedRunId)) {
+      setSelectedRunId(pagedRuns[0].runId);
+    }
+  }, [pagedRuns, runs.length, selectedRunId]);
+
+  useEffect(() => {
+    if (!selectedRun || selectedRun.status !== 'running') {
+      return undefined;
+    }
+
+    const runId = selectedRun.runId;
+    if (logCursorByRunIdRef.current[runId] === undefined) {
+      logCursorByRunIdRef.current[runId] = selectedRun.logs.length;
+    }
+
+    let stopped = false;
+    const pullLogs = async () => {
+      const cursor = logCursorByRunIdRef.current[runId] ?? 0;
+      try {
+        const chunk = await repository.getCicdRunLogs(runId, cursor, 400);
+        if (stopped) {
+          return;
+        }
+        logCursorByRunIdRef.current[runId] = chunk.nextCursor;
+
+        if (chunk.lines.length === 0 && chunk.status === 'running') {
+          setRuns((prev) =>
+            prev.map((item) =>
+              item.runId === runId
+                ? {
+                    ...item,
+                    status: chunk.status,
+                    finishedAt: chunk.finishedAt,
+                    stages: chunk.stages,
+                  }
+                : item,
+            ),
+          );
+          return;
+        }
+
+        setRuns((prev) =>
+          prev.map((item) => {
+            if (item.runId !== runId) {
+              return item;
+            }
+            return {
+              ...item,
+              status: chunk.status,
+              finishedAt: chunk.finishedAt,
+              stages: chunk.stages,
+              logs: chunk.lines.length > 0 ? [...item.logs, ...chunk.lines] : item.logs,
+            };
+          }),
+        );
+      } catch (error) {
+        if (!stopped) {
+          // 不中断页面操作，只等待下一次轮询重试。
+          console.error(error);
+        }
+      }
+    };
+
+    void pullLogs();
+    const timer = window.setInterval(() => {
+      void pullLogs();
+    }, 1000);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [repository, selectedRun?.runId, selectedRun?.status]);
+
+  useEffect(() => {
+    const container = runLogContainerRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [selectedRunId, selectedRun?.logs.length]);
 
   const displayedStages = selectedRun
     ? selectedRun.stages
@@ -129,6 +250,7 @@ export function CicdPage() {
       const values = await triggerForm.validateFields();
       const created = await repository.triggerCicdRun({
         pipelineKey: PIPELINE_KEY,
+        repoUrl: values.repoUrl,
         branch: values.branch,
         commitId: values.commitId,
         note: values.note,
@@ -136,7 +258,9 @@ export function CicdPage() {
       });
       message.success(`已触发流水线 ${created.runId}`);
       triggerForm.resetFields();
-      await loadData();
+      logCursorByRunIdRef.current[created.runId] = created.logs.length;
+      setRuns((prev) => [created, ...prev.filter((item) => item.runId !== created.runId)]);
+      setRunListPage(1);
       setSelectedRunId(created.runId);
     } catch (error) {
       if (error instanceof Error) {
@@ -145,86 +269,79 @@ export function CicdPage() {
     }
   };
 
-  const updateStage = async (stageKey: string, status: CicdStageStatus) => {
-    if (!selectedRun) {
-      return;
-    }
-
-    setOperatingStageKey(stageKey);
-    try {
-      const updatedRun = await repository.updateCicdStage({
-        runId: selectedRun.runId,
-        stageKey,
-        status,
-        note: `手动标记为 ${STAGE_STATUS_LABEL[status]}`,
-      });
-
-      setRuns((prev) => prev.map((item) => (item.runId === updatedRun.runId ? updatedRun : item)));
-      message.success(`阶段 ${stageKey} 已更新为 ${STAGE_STATUS_LABEL[status]}`);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '更新阶段状态失败');
-    } finally {
-      setOperatingStageKey(null);
-    }
-  };
-
-  const runTableData = runs.map((item) => ({
-    key: item.runId,
-    runId: item.runId,
-    branch: item.branch,
-    status: item.status,
-    triggeredBy: item.triggeredBy,
-    startedAt: new Date(item.startedAt).toLocaleString(),
-    finishedAt: item.finishedAt ? new Date(item.finishedAt).toLocaleString() : '-',
-  }));
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Title level={4} style={{ margin: 0 }}>
         CICD 流程（Hyperchain 二进制）
       </Title>
 
-      <Alert
-        type="warning"
-        showIcon
-        message="当前为占位流程：构建脚本路径、目标目录、机器凭据待你后续补充。"
-      />
+      <Row gutter={16} align="stretch">
+        <Col xs={24} xl={19} style={{ display: 'flex' }}>
+          <Card title="图形化流程操作" loading={loading} style={{ width: '100%', height: '100%' }}>
+            {displayedStages.length > 0 && (
+              <Steps
+                current={getCurrentStepIndex(displayedStages)}
+                items={displayedStages.map((item) => ({
+                  title: item.name,
+                  description: item.description,
+                  status: STEP_STATUS_MAP[item.status],
+                }))}
+              />
+            )}
 
-      <Row gutter={16}>
-        <Col xs={24} xl={14}>
-          <Card title="流水线配置" loading={loading}>
-            {pipeline ? (
-              <Descriptions bordered column={1} size="small">
-                <Descriptions.Item label="流水线标识">{pipeline.pipelineKey}</Descriptions.Item>
-                <Descriptions.Item label="项目/二进制">
-                  {pipeline.projectName} / {pipeline.binaryName}
-                </Descriptions.Item>
-                <Descriptions.Item label="构建机">
-                  {pipeline.buildMachine.name} ({pipeline.buildMachine.ip})
-                  <br />
-                  <Text type="secondary">{pipeline.buildMachine.note}</Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="目标机器">
-                  {pipeline.deployTarget.name} ({pipeline.deployTarget.ip})
-                  <br />
-                  <Text type="secondary">{pipeline.deployTarget.note}</Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="构建脚本">{pipeline.buildScriptPath}</Descriptions.Item>
-                <Descriptions.Item label="产物路径">{pipeline.artifactPath}</Descriptions.Item>
-                <Descriptions.Item label="SCP 目标目录">{pipeline.deployPath}</Descriptions.Item>
-              </Descriptions>
-            ) : null}
+            <Divider style={{ margin: '16px 0' }} />
+
+            <Row gutter={[12, 12]}>
+              {displayedStages.map((stage) => (
+                <Col xs={24} md={12} xl={6} key={stage.stageKey}>
+                  <Card size="small" title={stage.name} style={{ height: '100%' }}>
+                    <Tag color={STAGE_STATUS_COLOR[stage.status]} style={{ alignSelf: 'flex-start' }}>
+                      {STAGE_STATUS_LABEL[stage.status]}
+                    </Tag>
+                    <Paragraph style={{ marginBottom: 6, marginTop: 6 }}>
+                      <Text type="secondary">{stage.description}</Text>
+                    </Paragraph>
+                    <div
+                      style={{
+                        border: '1px solid #f0f0f0',
+                        borderRadius: 8,
+                        background: '#fafafa',
+                        padding: '8px 10px',
+                        height: 110,
+                        overflowY: 'auto',
+                        overflowX: 'hidden',
+                      }}
+                    >
+                      <Text
+                        code
+                        style={{
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-all',
+                          display: 'block',
+                          lineHeight: '18px',
+                        }}
+                      >
+                        {formatStageCommand(stage.command)}
+                      </Text>
+                    </div>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
           </Card>
         </Col>
 
-        <Col xs={24} xl={10}>
-          <Card title="触发 Hyperchain 流水线" loading={loading}>
-            <Form form={triggerForm} layout="vertical" initialValues={{ branch: 'release/hyperchain-placeholder' }}>
+        <Col xs={24} xl={5} style={{ display: 'flex' }}>
+          <Card title="触发 Hyperchain 流水线" loading={loading} style={{ width: '100%', height: '100%' }}>
+            <Form form={triggerForm} layout="vertical">
+              <Form.Item name="repoUrl" label="仓库地址" rules={[{ required: true, message: '请输入仓库地址' }]}>
+                <Input placeholder="例如 git@gitlab.example.com:hyperchain/go-hyperchain.git" />
+              </Form.Item>
               <Form.Item name="branch" label="分支" rules={[{ required: true, message: '请输入分支名称' }]}>
-                <Input placeholder="例如 release/hyperchain-v1" />
+                <Input placeholder="例如 develop-bm-zkj-perf" />
               </Form.Item>
               <Form.Item name="commitId" label="Commit (可选)">
-                <Input placeholder="占位：后续可接入真实 commit id" />
+                <Input placeholder="可选：用于记录触发时对应 commit" />
               </Form.Item>
               <Form.Item name="note" label="备注 (可选)">
                 <Input.TextArea rows={2} placeholder="例如：手工触发发布验证" />
@@ -239,87 +356,53 @@ export function CicdPage() {
         </Col>
       </Row>
 
-      <Card title="图形化流程操作" loading={loading}>
-        {displayedStages.length > 0 && (
-          <Steps
-            current={getCurrentStepIndex(displayedStages)}
-            items={displayedStages.map((item) => ({
-              title: item.name,
-              description: item.description,
-              status: STEP_STATUS_MAP[item.status],
-            }))}
-          />
-        )}
-
-        <Divider style={{ margin: '16px 0' }} />
-
-        <Row gutter={[12, 12]}>
-          {displayedStages.map((stage) => (
-            <Col xs={24} md={12} xl={6} key={stage.stageKey}>
-              <Card size="small" title={stage.name}>
-                <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                  <Tag color={STAGE_STATUS_COLOR[stage.status]}>{STAGE_STATUS_LABEL[stage.status]}</Tag>
-                  <Paragraph style={{ marginBottom: 0 }}>
-                    <Text type="secondary">{stage.description}</Text>
-                  </Paragraph>
-                  <Paragraph code style={{ marginBottom: 0, display: 'block', whiteSpace: 'normal' }}>
-                    {stage.command}
-                  </Paragraph>
-                  <Space wrap>
-                    <Button
-                      size="small"
-                      disabled={!canOperate || !selectedRun}
-                      loading={operatingStageKey === stage.stageKey}
-                      onClick={() => void updateStage(stage.stageKey, 'running')}
-                    >
-                      置为运行中
-                    </Button>
-                    <Button
-                      size="small"
-                      type="primary"
-                      disabled={!canOperate || !selectedRun}
-                      loading={operatingStageKey === stage.stageKey}
-                      onClick={() => void updateStage(stage.stageKey, 'success')}
-                    >
-                      置为成功
-                    </Button>
-                    <Button
-                      size="small"
-                      danger
-                      disabled={!canOperate || !selectedRun}
-                      loading={operatingStageKey === stage.stageKey}
-                      onClick={() => void updateStage(stage.stageKey, 'failed')}
-                    >
-                      置为失败
-                    </Button>
-                  </Space>
-                </Space>
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      </Card>
-
       <Card title="流水线运行记录" loading={loading}>
-        <Table
+        <Table<CicdRun>
           size="small"
-          pagination={false}
-          dataSource={runTableData}
-          rowSelection={{
-            type: 'radio',
-            selectedRowKeys: selectedRunId ? [selectedRunId] : [],
-            onChange: (selectedKeys) => {
-              const next = selectedKeys[0];
-              if (typeof next === 'string') {
-                setSelectedRunId(next);
-              }
+          rowKey="runId"
+          dataSource={pagedRuns}
+          locale={{ emptyText: '暂无运行记录' }}
+          onRow={(record) => ({
+            onClick: () => setSelectedRunId(record.runId),
+            style: {
+              cursor: 'pointer',
+              backgroundColor: record.runId === selectedRunId ? '#f0f7ff' : undefined,
             },
+          })}
+          pagination={{
+            current: runListPage,
+            pageSize: RUN_LIST_PAGE_SIZE,
+            total: runs.length,
+            showSizeChanger: false,
+            onChange: (page) => setRunListPage(page),
           }}
           columns={[
-            { title: 'Run ID', dataIndex: 'runId', key: 'runId', width: 120 },
-            { title: '分支', dataIndex: 'branch', key: 'branch', width: 220 },
+            { title: '运行编号', dataIndex: 'runId', key: 'runId', width: 140 },
             {
-              title: '状态',
+              title: '仓库',
+              dataIndex: 'repoUrl',
+              key: 'repoUrl',
+              ellipsis: true,
+              render: (value?: string) => value ?? '-',
+            },
+            { title: '分支', dataIndex: 'branch', key: 'branch', width: 220, ellipsis: true },
+            { title: '触发人', dataIndex: 'triggeredBy', key: 'triggeredBy', width: 100 },
+            {
+              title: '开始时间',
+              dataIndex: 'startedAt',
+              key: 'startedAt',
+              width: 180,
+              render: (value?: string) => toLocalTime(value),
+            },
+            {
+              title: '结束时间',
+              dataIndex: 'finishedAt',
+              key: 'finishedAt',
+              width: 180,
+              render: (value?: string) => toLocalTime(value),
+            },
+            {
+              title: '运行状态',
               dataIndex: 'status',
               key: 'status',
               width: 120,
@@ -327,20 +410,20 @@ export function CicdPage() {
                 <Tag color={RUN_STATUS_COLOR[status]}>{RUN_STATUS_LABEL[status]}</Tag>
               ),
             },
-            { title: '触发人', dataIndex: 'triggeredBy', key: 'triggeredBy', width: 120 },
-            { title: '开始时间', dataIndex: 'startedAt', key: 'startedAt', width: 180 },
-            { title: '结束时间', dataIndex: 'finishedAt', key: 'finishedAt', width: 180 },
           ]}
         />
 
         {selectedRun && (
           <Card title={`Run 日志 - ${selectedRun.runId}`} size="small" style={{ marginTop: 12 }}>
-            <div style={{ maxHeight: 220, overflowY: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}>
+            <div
+              ref={runLogContainerRef}
+              style={{ maxHeight: 220, overflowY: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}
+            >
               {selectedRun.logs.length === 0 ? (
                 <Text type="secondary">暂无日志</Text>
               ) : (
-                selectedRun.logs.map((log) => (
-                  <div key={log} style={{ fontFamily: 'Menlo, monospace', fontSize: 12 }}>
+                selectedRun.logs.map((log, index) => (
+                  <div key={`${selectedRun.runId}-${index}`} style={{ fontFamily: 'Menlo, monospace', fontSize: 12 }}>
                     {log}
                   </div>
                 ))

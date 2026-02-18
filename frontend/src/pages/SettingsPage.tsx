@@ -10,6 +10,10 @@ export function SettingsPage() {
   const [versionList, setVersionList] = useState(versions);
   const [userList, setUserList] = useState<{ userId: string; username: string; email: string; role: string; status: string }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [savingProjectName, setSavingProjectName] = useState(false);
+  const [creatingVersion, setCreatingVersion] = useState(false);
+  const [switchingVersionKey, setSwitchingVersionKey] = useState<string | null>(null);
+  const [deletingVersionKey, setDeletingVersionKey] = useState<string | null>(null);
   const [newVersion, setNewVersion] = useState('');
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [userForm] = Form.useForm();
@@ -52,9 +56,16 @@ export function SettingsPage() {
     if (!canEditConfig) {
       return;
     }
-    await repository.updateConfig(projectName.trim());
-    message.success('项目名称已保存');
-    await refreshBootstrap();
+    setSavingProjectName(true);
+    try {
+      await repository.updateConfig(projectName.trim());
+      message.success('项目名称已保存');
+      await refreshBootstrap();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '保存项目名称失败');
+    } finally {
+      setSavingProjectName(false);
+    }
   };
 
   const addVersion = async () => {
@@ -62,25 +73,46 @@ export function SettingsPage() {
       message.warning('请输入版本号');
       return;
     }
-    await repository.createVersion(newVersion.trim());
-    setNewVersion('');
-    message.success('版本创建成功');
-    await loadData();
-    await refreshBootstrap();
+    setCreatingVersion(true);
+    try {
+      await repository.createVersion(newVersion.trim());
+      setNewVersion('');
+      message.success('版本创建成功');
+      await loadData();
+      await refreshBootstrap();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '新增版本失败');
+    } finally {
+      setCreatingVersion(false);
+    }
   };
 
   const setCurrentVersion = async (versionKey: string) => {
-    await repository.setCurrentVersion(versionKey);
-    message.success('系统默认版本已更新');
-    await loadData();
-    await refreshBootstrap();
+    setSwitchingVersionKey(versionKey);
+    try {
+      await repository.setCurrentVersion(versionKey);
+      message.success('系统默认版本已更新');
+      await loadData();
+      await refreshBootstrap();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '设置当前版本失败');
+    } finally {
+      setSwitchingVersionKey(null);
+    }
   };
 
   const removeVersion = async (versionKey: string) => {
-    await repository.deleteVersion(versionKey);
-    message.success('版本已删除');
-    await loadData();
-    await refreshBootstrap();
+    setDeletingVersionKey(versionKey);
+    try {
+      await repository.deleteVersion(versionKey);
+      message.success('版本已删除');
+      await loadData();
+      await refreshBootstrap();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '删除版本失败');
+    } finally {
+      setDeletingVersionKey(null);
+    }
   };
 
   const createUser = async () => {
@@ -113,7 +145,7 @@ export function SettingsPage() {
             onChange={(event) => setProjectName(event.target.value)}
             placeholder="项目名称"
           />
-          <Button type="primary" disabled={!canEditConfig} onClick={() => void saveProjectName()}>
+          <Button type="primary" loading={savingProjectName} disabled={!canEditConfig} onClick={() => void saveProjectName()}>
             保存
           </Button>
         </Space>
@@ -129,7 +161,7 @@ export function SettingsPage() {
               placeholder="例如 v1.2.0"
               onChange={(event) => setNewVersion(event.target.value)}
             />
-            <Button type="primary" disabled={!canManageVersions} onClick={() => void addVersion()}>
+            <Button type="primary" loading={creatingVersion} disabled={!canManageVersions} onClick={() => void addVersion()}>
               新增版本
             </Button>
           </Space>
@@ -158,6 +190,7 @@ export function SettingsPage() {
                   <Space>
                     <Button
                       size="small"
+                      loading={switchingVersionKey === record.versionKey}
                       disabled={!canManageVersions || record.isCurrent}
                       onClick={() => void setCurrentVersion(record.versionKey)}
                     >
@@ -166,12 +199,15 @@ export function SettingsPage() {
                     <Button
                       size="small"
                       danger
+                      loading={deletingVersionKey === record.versionKey}
                       disabled={!canManageVersions || record.isCurrent}
                       onClick={() => {
                         Modal.confirm({
                           title: `确认删除 ${record.versionKey}？`,
                           content: '若版本下已有用例执行记录或问题单，系统会阻止删除。',
-                          onOk: () => removeVersion(record.versionKey),
+                          onOk: async () => {
+                            await removeVersion(record.versionKey);
+                          },
                         });
                       }}
                     >

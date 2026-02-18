@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..database import (
+    CaseStatus,
     CaseLinkType,
     Issue,
     IssueCaseLink,
     IssuePriority,
     IssueSeverity,
     IssueStatus,
+    RunCase,
     TestCase,
     UserAccount,
     UserRole,
@@ -35,6 +37,7 @@ from ..services import (
     as_csv_response,
     as_xlsx_response,
     find_case_by_key,
+    find_run_by_key,
     find_user_by_user_id,
     find_version_by_key,
     get_or_create_default_snapshot,
@@ -238,8 +241,18 @@ def close_issue(
         raise AppError("VALIDATION_ERROR", "关闭前必须关联回归用例", status_code=422)
 
     fix_version = find_version_by_key(db, payload.fix_version_key)
-    verify_version = find_version_by_key(db, payload.verify_version_key)
-    verify_snapshot = get_or_create_default_snapshot(db, verify_version)
+    verify_version = None
+    verify_snapshot = None
+    run = None
+
+    if payload.run_key:
+        run = find_run_by_key(db, payload.run_key)
+        verify_version = run.plan.version
+    else:
+        if not payload.verify_version_key:
+            raise AppError("VALIDATION_ERROR", "未提供 run_key 时 verify_version_key 不能为空", status_code=422)
+        verify_version = find_version_by_key(db, payload.verify_version_key)
+        verify_snapshot = get_or_create_default_snapshot(db, verify_version)
 
     missing_cases: list[str] = []
     for case_key in payload.regression_case_keys:
@@ -263,22 +276,31 @@ def close_issue(
                 )
             )
 
-        status_row = (
-            db.query(VersionCaseStatus)
-            .filter(
-                VersionCaseStatus.version_id == verify_version.id,
-                VersionCaseStatus.snapshot_id == verify_snapshot.id,
-                VersionCaseStatus.case_id == test_case.id,
+        if run is not None:
+            run_case = (
+                db.query(RunCase)
+                .filter(RunCase.run_id == run.id, RunCase.case_id == test_case.id)
+                .first()
             )
-            .first()
-        )
-        if not status_row or status_row.status != "passed":
-            missing_cases.append(case_key)
+            if not run_case or run_case.current_status != CaseStatus.passed:
+                missing_cases.append(case_key)
+        else:
+            status_row = (
+                db.query(VersionCaseStatus)
+                .filter(
+                    VersionCaseStatus.version_id == verify_version.id,
+                    VersionCaseStatus.snapshot_id == verify_snapshot.id,
+                    VersionCaseStatus.case_id == test_case.id,
+                )
+                .first()
+            )
+            if not status_row or status_row.status != "passed":
+                missing_cases.append(case_key)
 
     if missing_cases:
         raise AppError(
             "VALIDATION_ERROR",
-            "回归用例在验证版本下未全部通过",
+            "回归用例未全部通过",
             status_code=422,
             details={"unpassed_cases": missing_cases},
         )
@@ -293,7 +315,11 @@ def close_issue(
         action="issue.close",
         object_type="issue",
         object_id=issue.issue_key,
-        diff={"fix_version": payload.fix_version_key, "verify_version": payload.verify_version_key},
+        diff={
+            "fix_version": payload.fix_version_key,
+            "verify_version": verify_version.version_key,
+            "run_key": run.run_key if run else None,
+        },
     )
 
     db.commit()

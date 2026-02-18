@@ -8,9 +8,13 @@ from pydantic import BaseModel, EmailStr, Field
 from .database import (
     CaseLinkType,
     CaseStatus,
+    CaseTreeNodeType,
     IssuePriority,
     IssueSeverity,
     IssueStatus,
+    PlanStatus,
+    RunStatus,
+    SuiteVersionStatus,
     UserRole,
     UserStatus,
 )
@@ -108,6 +112,132 @@ class CaseStatusUpdateRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list)
 
 
+class CaseTreeNodeCreateRequest(BaseModel):
+    version_key: str = Field(min_length=1, max_length=64)
+    parent_node_id: Optional[str] = Field(default=None, max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    node_type: CaseTreeNodeType
+
+
+class CaseCreateRequest(BaseModel):
+    version_key: str = Field(min_length=1, max_length=64)
+    parent_node_id: str = Field(min_length=1, max_length=32)
+    case_key: str = Field(min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=256)
+    steps: str = Field(min_length=1)
+    expected: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+class CaseUpdateRequest(BaseModel):
+    parent_node_id: Optional[str] = Field(default=None, max_length=32)
+    title: str = Field(min_length=1, max_length=256)
+    steps: str = Field(min_length=1)
+    expected: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+class SuiteCreateRequest(BaseModel):
+    version_key: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    description: Optional[str] = None
+    case_keys: Optional[list[str]] = None
+
+
+class SuiteUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: Optional[str] = None
+
+
+class SuiteOut(BaseModel):
+    suite_key: str
+    version_key: str
+    name: str
+    description: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SuiteVersionOut(BaseModel):
+    suite_version_key: str
+    suite_key: str
+    ver_no: int
+    status: SuiteVersionStatus
+    note: Optional[str] = None
+    case_count: int
+    created_at: datetime
+    published_at: Optional[datetime] = None
+
+
+class SuiteVersionCreateRequest(BaseModel):
+    note: Optional[str] = None
+
+
+class SuiteVersionCaseBatchRequest(BaseModel):
+    case_keys: list[str] = Field(min_length=1)
+
+
+class PlanCreateRequest(BaseModel):
+    version_key: str = Field(min_length=1, max_length=64)
+    suite_version_key: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    description: Optional[str] = None
+
+
+class PlanOut(BaseModel):
+    plan_key: str
+    version_key: str
+    suite_version_key: str
+    name: str
+    description: Optional[str] = None
+    status: PlanStatus
+    created_at: datetime
+    updated_at: datetime
+    run_count: int = 0
+    pass_rate: Optional[float] = None
+
+
+class RunCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    build_no: Optional[str] = Field(default=None, max_length=128)
+    environment: Optional[str] = Field(default=None, max_length=128)
+    case_keys: Optional[list[str]] = None
+
+
+class RunOut(BaseModel):
+    run_key: str
+    plan_key: str
+    version_key: str
+    name: str
+    build_no: Optional[str] = None
+    environment: Optional[str] = None
+    status: RunStatus
+    created_at: datetime
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    pass_rate: Optional[float] = None
+    executed_cases: int = 0
+    total_cases: int = 0
+
+
+class RunCaseOut(BaseModel):
+    run_case_key: str
+    case_key: str
+    title: str
+    module: str
+    steps: str
+    expected: str
+    status: CaseStatus
+    last_updated_at: datetime
+    last_updated_by: Optional[str] = None
+
+
+class RunCaseStatusUpdateRequest(BaseModel):
+    status: CaseStatus
+    remark: Optional[str] = None
+    attachments: list[Attachment] = Field(default_factory=list)
+
+
 class IssueCaseLinkPayload(BaseModel):
     case_key: str
     link_type: CaseLinkType
@@ -155,7 +285,8 @@ class IssueTransitionRequest(BaseModel):
 
 class IssueCloseRequest(BaseModel):
     fix_version_key: str
-    verify_version_key: str
+    verify_version_key: Optional[str] = None
+    run_key: Optional[str] = None
     regression_case_keys: list[str]
 
 

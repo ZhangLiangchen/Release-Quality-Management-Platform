@@ -56,8 +56,8 @@ def update_config(
     config.project_name = payload.project_name
 
     if payload.current_version_key:
-        if current_user.role != UserRole.admin:
-            raise AppError("FORBIDDEN", "仅管理员可修改系统默认版本", status_code=403)
+        if current_user.role not in {UserRole.admin, UserRole.qa}:
+            raise AppError("FORBIDDEN", "仅管理员或 QA 可修改系统默认版本", status_code=403)
 
         version = find_version_by_key(db, payload.current_version_key)
         db.query(Version).update({Version.is_current: False})

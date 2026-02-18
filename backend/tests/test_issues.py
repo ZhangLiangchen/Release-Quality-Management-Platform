@@ -37,3 +37,23 @@ def test_issue_close_requires_regression_passed(client: TestClient, auth_headers
     )
     assert close_resp_2.status_code == 200
     assert close_resp_2.json()["data"]["status"] == "closed"
+
+
+def test_issue_close_with_run_key(client: TestClient, auth_headers):
+    headers = auth_headers("qa")
+
+    latest_run_resp = client.get("/api/v1/runs/latest", params={"version_key": "v1.0.0"}, headers=headers)
+    assert latest_run_resp.status_code == 200
+    run_key = latest_run_resp.json()["data"]["run_key"]
+
+    close_resp = client.post(
+        "/api/v1/issues/ISS-001:close",
+        json={
+            "fix_version_key": "v1.0.0",
+            "run_key": run_key,
+            "regression_case_keys": ["TC-001"],
+        },
+        headers=headers,
+    )
+    assert close_resp.status_code == 200
+    assert close_resp.json()["data"]["status"] == "closed"

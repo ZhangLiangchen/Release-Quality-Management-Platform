@@ -3,14 +3,25 @@ import type {
   AutomationFramework,
   AutomationOperationMode,
   AutomationRun,
+  AutomationRunLogChunk,
   AutomationRunStatus,
+  CaseTreeNode,
+  CaseTreeNodeType,
   CaseDetail,
   CaseWithStatus,
+  CicdRunLogChunk,
   CicdPipeline,
   CicdRun,
   CicdStage,
   CloseIssuePayload,
+  CreatePlanPayload,
+  CreateRunPayload,
+  CreateSuitePayload,
+  UpdateSuitePayload,
   CreateIssuePayload,
+  CreateCasePayload,
+  UpdateCasePayload,
+  CreateCaseTreeNodePayload,
   DashboardKpi,
   ImportValidationResult,
   Issue,
@@ -18,12 +29,21 @@ import type {
   LoginPayload,
   LoginResult,
   ModuleCaseGroup,
+  Plan,
   ProjectConfig,
+  Run,
+  RunCase,
+  RunCaseHistory,
   SaveAutomationConfigurationPayload,
   SaveAutomationTestSuitePayload,
+  Suite,
+  SuiteCaseSummary,
+  SuiteVersion,
+  SuiteVersionDetail,
   TriggerAutomationRunPayload,
   TriggerCicdRunPayload,
   UpdateCaseStatusPayload,
+  UpdateRunCaseStatusPayload,
   UpdateCicdStagePayload,
   User,
   Version,
@@ -46,6 +66,12 @@ interface ErrorEnvelope {
 }
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+type RequestError = Error & {
+  code?: string;
+  details?: Record<string, unknown>;
+  status?: number;
+};
 
 function buildQuery(params: Record<string, string | undefined>): string {
   const search = new URLSearchParams();
@@ -127,6 +153,147 @@ function toIssue(row: {
       linkType: link.link_type,
       note: link.note,
     })),
+  };
+}
+
+interface CaseTreeNodeRow {
+  node_id: string;
+  name: string;
+  node_type: CaseTreeNodeType;
+  parent_node_id?: string | null;
+  full_path: string;
+  children: CaseTreeNodeRow[];
+  cases: {
+    case_key: string;
+    title: string;
+    module: string;
+    latest_status: CaseWithStatus['latestStatus'];
+  }[];
+}
+
+function toCaseTreeNode(row: CaseTreeNodeRow): CaseTreeNode {
+  return {
+    nodeId: row.node_id,
+    name: row.name,
+    nodeType: row.node_type,
+    parentNodeId: row.parent_node_id ?? undefined,
+    fullPath: row.full_path,
+    children: row.children.map((item) => toCaseTreeNode(item)),
+    cases: row.cases.map((item) => ({
+      caseKey: item.case_key,
+      title: item.title,
+      module: item.module,
+      latestStatus: item.latest_status,
+    })),
+  };
+}
+
+function toSuiteVersion(row: {
+  suite_version_key: string;
+  suite_key: string;
+  ver_no: number;
+  status: SuiteVersion['status'];
+  note?: string | null;
+  case_count: number;
+  created_at: string;
+  published_at?: string | null;
+}): SuiteVersion {
+  return {
+    suiteVersionKey: row.suite_version_key,
+    suiteKey: row.suite_key,
+    verNo: row.ver_no,
+    status: row.status,
+    note: row.note ?? undefined,
+    caseCount: row.case_count,
+    createdAt: row.created_at,
+    publishedAt: row.published_at ?? undefined,
+  };
+}
+
+function toSuite(row: {
+  suite_key: string;
+  version_key: string;
+  name: string;
+  description?: string | null;
+  created_at: string;
+  updated_at: string;
+  versions: {
+    suite_version_key: string;
+    suite_key: string;
+    ver_no: number;
+    status: SuiteVersion['status'];
+    note?: string | null;
+    case_count: number;
+    created_at: string;
+    published_at?: string | null;
+  }[];
+}): Suite {
+  return {
+    suiteKey: row.suite_key,
+    versionKey: row.version_key,
+    name: row.name,
+    description: row.description ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    versions: (row.versions ?? []).map((item) => toSuiteVersion(item)),
+  };
+}
+
+function toPlan(row: {
+  plan_key: string;
+  version_key: string;
+  suite_version_key: string;
+  name: string;
+  description?: string | null;
+  status: Plan['status'];
+  created_at: string;
+  updated_at: string;
+  run_count: number;
+  pass_rate?: number | null;
+}): Plan {
+  return {
+    planKey: row.plan_key,
+    versionKey: row.version_key,
+    suiteVersionKey: row.suite_version_key,
+    name: row.name,
+    description: row.description ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    runCount: row.run_count,
+    passRate: row.pass_rate ?? undefined,
+  };
+}
+
+function toRun(row: {
+  run_key: string;
+  plan_key: string;
+  version_key: string;
+  name: string;
+  build_no?: string | null;
+  environment?: string | null;
+  status: Run['status'];
+  created_at: string;
+  started_at: string;
+  finished_at?: string | null;
+  pass_rate?: number | null;
+  executed_cases: number;
+  total_cases: number;
+}): Run {
+  return {
+    runKey: row.run_key,
+    planKey: row.plan_key,
+    versionKey: row.version_key,
+    name: row.name,
+    buildNo: row.build_no ?? undefined,
+    environment: row.environment ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at ?? undefined,
+    passRate: row.pass_rate ?? undefined,
+    executedCases: row.executed_cases,
+    totalCases: row.total_cases,
   };
 }
 
@@ -224,7 +391,8 @@ function toAutomationRun(row: {
   triggered_by: string;
   started_at: string;
   finished_at?: string | null;
-  logs: string[];
+  logs?: string[];
+  report_archive_path?: string | null;
 }): AutomationRun {
   return {
     runId: row.run_id,
@@ -238,7 +406,8 @@ function toAutomationRun(row: {
     triggeredBy: row.triggered_by,
     startedAt: row.started_at,
     finishedAt: row.finished_at ?? undefined,
-    logs: row.logs,
+    logs: row.logs ?? [],
+    reportArchivePath: row.report_archive_path ?? undefined,
   };
 }
 
@@ -283,20 +452,39 @@ export class HttpRepository implements Repository {
     if (options?.expectBlob) {
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(errorText || '请求失败');
+        const error = new Error(errorText || '请求失败') as RequestError;
+        error.status = response.status;
+        throw error;
       }
       return (await response.blob()) as T;
     }
 
-    const payload = (await response.json()) as Envelope<T> | ErrorEnvelope;
-    if (!response.ok) {
-      if ('error' in payload) {
-        throw new Error(payload.error.message);
+    const rawText = await response.text();
+    let payload: Envelope<T> | ErrorEnvelope | null = null;
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText) as Envelope<T> | ErrorEnvelope;
+      } catch {
+        payload = null;
       }
-      throw new Error('请求失败');
+    }
+    if (!response.ok) {
+      if (payload && 'error' in payload) {
+        const error = new Error(payload.error.message) as RequestError;
+        error.code = payload.error.code;
+        error.details = payload.error.details;
+        error.status = response.status;
+        throw error;
+      }
+      const error = new Error(rawText || '请求失败') as RequestError;
+      error.status = response.status;
+      throw error;
     }
 
-    return (payload as Envelope<T>).data;
+    if (!payload || !('data' in payload)) {
+      throw new Error('响应数据格式不正确');
+    }
+    return payload.data;
   }
 
   async login(payload: LoginPayload): Promise<LoginResult> {
@@ -444,6 +632,56 @@ export class HttpRepository implements Repository {
     }));
   }
 
+  async listCaseTree(versionKey: string): Promise<CaseTreeNode[]> {
+    const data = await this.request<{
+      version_key: string;
+      tree: CaseTreeNodeRow[];
+    }>('GET', `/case-tree${buildQuery({ version_key: versionKey })}`);
+    return data.tree.map((item) => toCaseTreeNode(item));
+  }
+
+  async createCaseTreeNode(payload: CreateCaseTreeNodePayload): Promise<CaseTreeNode> {
+    const data = await this.request<CaseTreeNodeRow>('POST', '/case-tree/nodes', {
+      jsonBody: {
+        version_key: payload.versionKey,
+        parent_node_id: payload.parentNodeId ?? null,
+        name: payload.name,
+        node_type: payload.nodeType,
+      },
+    });
+    return toCaseTreeNode({ ...data, children: data.children ?? [], cases: data.cases ?? [] });
+  }
+
+  async createCase(payload: CreateCasePayload): Promise<void> {
+    await this.request('POST', '/cases', {
+      jsonBody: {
+        version_key: payload.versionKey,
+        parent_node_id: payload.parentNodeId,
+        case_key: payload.caseKey,
+        title: payload.title,
+        steps: payload.steps,
+        expected: payload.expected,
+        tags: payload.tags,
+      },
+    });
+  }
+
+  async updateCase(payload: UpdateCasePayload): Promise<void> {
+    await this.request('PUT', `/cases/${encodeURIComponent(payload.caseKey)}`, {
+      jsonBody: {
+        parent_node_id: payload.parentNodeId ?? null,
+        title: payload.title,
+        steps: payload.steps,
+        expected: payload.expected,
+        tags: payload.tags,
+      },
+    });
+  }
+
+  async deleteCase(caseKey: string): Promise<void> {
+    await this.request('DELETE', `/cases/${encodeURIComponent(caseKey)}`);
+  }
+
   async getCaseDetail(versionKey: string, caseKey: string): Promise<CaseDetail> {
     const data = await this.request<{
       case_info: {
@@ -500,6 +738,398 @@ export class HttpRepository implements Repository {
         operator: operator.userId,
       },
     });
+  }
+
+  async listSuites(versionKey: string): Promise<Suite[]> {
+    const data = await this.request<
+      {
+        suite_key: string;
+        version_key: string;
+        name: string;
+        description?: string | null;
+        created_at: string;
+        updated_at: string;
+        versions: {
+          suite_version_key: string;
+          suite_key: string;
+          ver_no: number;
+          status: SuiteVersion['status'];
+          note?: string | null;
+          case_count: number;
+          created_at: string;
+          published_at?: string | null;
+        }[];
+      }[]
+    >('GET', `/suites${buildQuery({ version_key: versionKey })}`);
+    return data.map((item) => toSuite(item));
+  }
+
+  async createSuite(payload: CreateSuitePayload): Promise<Suite> {
+    const data = await this.request<{
+      suite_key: string;
+      version_key: string;
+      name: string;
+      description?: string | null;
+      created_at: string;
+      updated_at: string;
+      versions: {
+        suite_version_key: string;
+        suite_key: string;
+        ver_no: number;
+        status: SuiteVersion['status'];
+        note?: string | null;
+        case_count: number;
+        created_at: string;
+        published_at?: string | null;
+      }[];
+    }>('POST', '/suites', {
+      jsonBody: {
+        version_key: payload.versionKey,
+        name: payload.name,
+        description: payload.description,
+        case_keys: payload.caseKeys,
+      },
+    });
+    return toSuite(data);
+  }
+
+  async updateSuite(payload: UpdateSuitePayload): Promise<Suite> {
+    const data = await this.request<{
+      suite_key: string;
+      version_key: string;
+      name: string;
+      description?: string | null;
+      created_at: string;
+      updated_at: string;
+      versions: {
+        suite_version_key: string;
+        suite_key: string;
+        ver_no: number;
+        status: SuiteVersion['status'];
+        note?: string | null;
+        case_count: number;
+        created_at: string;
+        published_at?: string | null;
+      }[];
+    }>('PUT', `/suites/${encodeURIComponent(payload.suiteKey)}`, {
+      jsonBody: {
+        name: payload.name,
+        description: payload.description,
+      },
+    });
+    return toSuite(data);
+  }
+
+  async deleteSuite(suiteKey: string, suiteVersionKey: string): Promise<void> {
+    await this.request('DELETE', `/suites/${encodeURIComponent(suiteKey)}${buildQuery({ suite_version_key: suiteVersionKey })}`);
+  }
+
+  async getSuiteVersionDetail(suiteKey: string, suiteVersionKey: string): Promise<SuiteVersionDetail> {
+    const data = await this.request<{
+      suite_key: string;
+      name: string;
+      description?: string | null;
+      suite_version: {
+        suite_version_key: string;
+        suite_key?: string;
+        ver_no: number;
+        status: SuiteVersion['status'];
+        note?: string | null;
+        case_count: number;
+        created_at: string;
+        published_at?: string | null;
+      };
+      cases: {
+        case_key: string;
+        title: string;
+        module: string;
+        status: SuiteCaseSummary['status'];
+        issue_linked?: boolean;
+      }[];
+    }>('GET', `/suites/${encodeURIComponent(suiteKey)}/versions/${encodeURIComponent(suiteVersionKey)}`);
+
+    return {
+      suiteKey: data.suite_key,
+      name: data.name,
+      description: data.description ?? undefined,
+      suiteVersion: toSuiteVersion({
+        ...data.suite_version,
+        suite_key: data.suite_key,
+      }),
+      cases: data.cases.map((item) => ({
+        caseKey: item.case_key,
+        title: item.title,
+        module: item.module,
+        status: item.status,
+        issueLinked: Boolean(item.issue_linked),
+      })),
+    };
+  }
+
+  async deriveSuiteVersion(suiteKey: string, note?: string): Promise<SuiteVersion> {
+    const data = await this.request<{
+      suite_version_key: string;
+      suite_key: string;
+      ver_no: number;
+      status: SuiteVersion['status'];
+      note?: string | null;
+      case_count: number;
+      created_at: string;
+      published_at?: string | null;
+    }>('POST', `/suites/${encodeURIComponent(suiteKey)}/versions`, { jsonBody: { note } });
+    return toSuiteVersion(data);
+  }
+
+  async publishSuiteVersion(suiteKey: string, suiteVersionKey: string): Promise<SuiteVersion> {
+    const data = await this.request<{
+      suite_version_key: string;
+      suite_key: string;
+      ver_no: number;
+      status: SuiteVersion['status'];
+      note?: string | null;
+      case_count: number;
+      created_at: string;
+      published_at?: string | null;
+    }>('POST', `/suites/${encodeURIComponent(suiteKey)}/versions/${encodeURIComponent(suiteVersionKey)}/publish`);
+    return toSuiteVersion(data);
+  }
+
+  async addSuiteCases(suiteKey: string, suiteVersionKey: string, caseKeys: string[]): Promise<void> {
+    await this.request('POST', `/suites/${encodeURIComponent(suiteKey)}/versions/${encodeURIComponent(suiteVersionKey)}/cases:add`, {
+      jsonBody: { case_keys: caseKeys },
+    });
+  }
+
+  async removeSuiteCases(suiteKey: string, suiteVersionKey: string, caseKeys: string[]): Promise<void> {
+    await this.request('POST', `/suites/${encodeURIComponent(suiteKey)}/versions/${encodeURIComponent(suiteVersionKey)}/cases:remove`, {
+      jsonBody: { case_keys: caseKeys },
+    });
+  }
+
+  async listPlans(versionKey: string): Promise<Plan[]> {
+    const data = await this.request<
+      {
+        plan_key: string;
+        version_key: string;
+        suite_version_key: string;
+        name: string;
+        description?: string | null;
+        status: Plan['status'];
+        created_at: string;
+        updated_at: string;
+        run_count: number;
+        pass_rate?: number | null;
+      }[]
+    >('GET', `/plans${buildQuery({ version_key: versionKey })}`);
+    return data.map((item) => toPlan(item));
+  }
+
+  async createPlan(payload: CreatePlanPayload): Promise<Plan> {
+    const data = await this.request<{
+      plan_key: string;
+      version_key: string;
+      suite_version_key: string;
+      name: string;
+      description?: string | null;
+      status: Plan['status'];
+      created_at: string;
+      updated_at: string;
+      run_count: number;
+      pass_rate?: number | null;
+    }>('POST', '/plans', {
+      jsonBody: {
+        version_key: payload.versionKey,
+        suite_version_key: payload.suiteVersionKey,
+        name: payload.name,
+        description: payload.description,
+      },
+    });
+    return toPlan(data);
+  }
+
+  async deletePlan(planKey: string): Promise<void> {
+    await this.request('DELETE', `/plans/${encodeURIComponent(planKey)}`);
+  }
+
+  async getPlanDetail(planKey: string): Promise<{ plan: Plan; runs: Run[] }> {
+    const data = await this.request<{
+      plan: {
+        plan_key: string;
+        version_key: string;
+        suite_version_key: string;
+        name: string;
+        description?: string | null;
+        status: Plan['status'];
+        created_at: string;
+        updated_at: string;
+      };
+      runs: {
+        run_key: string;
+        plan_key: string;
+        version_key: string;
+        name: string;
+        build_no?: string | null;
+        environment?: string | null;
+        status: Run['status'];
+        created_at: string;
+        started_at: string;
+        finished_at?: string | null;
+        pass_rate?: number | null;
+        executed_cases: number;
+        total_cases: number;
+      }[];
+    }>('GET', `/plans/${encodeURIComponent(planKey)}`);
+    return {
+      plan: toPlan({
+        ...data.plan,
+        run_count: data.runs.length,
+        pass_rate: data.runs[0]?.pass_rate ?? null,
+      }),
+      runs: data.runs.map((item) => toRun(item)),
+    };
+  }
+
+  async createRun(planKey: string, payload: CreateRunPayload): Promise<Run> {
+    const data = await this.request<{
+      run_key: string;
+      plan_key: string;
+      version_key: string;
+      name: string;
+      build_no?: string | null;
+      environment?: string | null;
+      status: Run['status'];
+      created_at: string;
+      started_at: string;
+      finished_at?: string | null;
+      pass_rate?: number | null;
+      executed_cases: number;
+      total_cases: number;
+    }>('POST', `/plans/${encodeURIComponent(planKey)}/runs`, {
+      jsonBody: {
+        name: payload.name,
+        build_no: payload.buildNo,
+        environment: payload.environment,
+        case_keys: payload.caseKeys,
+      },
+    });
+    return toRun(data);
+  }
+
+  async listRuns(versionKey: string): Promise<Run[]> {
+    const data = await this.request<
+      {
+        run_key: string;
+        plan_key: string;
+        version_key: string;
+        name: string;
+        build_no?: string | null;
+        environment?: string | null;
+        status: Run['status'];
+        created_at: string;
+        started_at: string;
+        finished_at?: string | null;
+        pass_rate?: number | null;
+        executed_cases: number;
+        total_cases: number;
+      }[]
+    >('GET', `/runs${buildQuery({ version_key: versionKey })}`);
+    return data.map((item) => toRun(item));
+  }
+
+  async getLatestRun(versionKey: string): Promise<Run> {
+    const data = await this.request<{
+      run_key: string;
+      plan_key: string;
+      version_key: string;
+      name: string;
+      build_no?: string | null;
+      environment?: string | null;
+      status: Run['status'];
+      created_at: string;
+      started_at: string;
+      finished_at?: string | null;
+      pass_rate?: number | null;
+      executed_cases: number;
+      total_cases: number;
+    }>('GET', `/runs/latest${buildQuery({ version_key: versionKey })}`);
+    return toRun(data);
+  }
+
+  async getRunDetail(runKey: string): Promise<Run> {
+    const data = await this.request<{
+      run_key: string;
+      plan_key: string;
+      version_key: string;
+      name: string;
+      build_no?: string | null;
+      environment?: string | null;
+      status: Run['status'];
+      created_at: string;
+      started_at: string;
+      finished_at?: string | null;
+      pass_rate?: number | null;
+      executed_cases: number;
+      total_cases: number;
+    }>('GET', `/runs/${encodeURIComponent(runKey)}`);
+    return toRun(data);
+  }
+
+  async listRunCases(runKey: string, status?: RunCase['status'], keyword?: string): Promise<RunCase[]> {
+    const data = await this.request<
+      {
+        run_case_key: string;
+        case_key: string;
+        title: string;
+        module: string;
+        steps: string;
+        expected: string;
+        status: RunCase['status'];
+        last_updated_at: string;
+        last_updated_by?: string | null;
+      }[]
+    >('GET', `/runs/${encodeURIComponent(runKey)}/cases${buildQuery({ status, keyword })}`);
+    return data.map((item) => ({
+      runCaseKey: item.run_case_key,
+      caseKey: item.case_key,
+      title: item.title,
+      module: item.module,
+      steps: item.steps,
+      expected: item.expected,
+      status: item.status,
+      lastUpdatedAt: item.last_updated_at,
+      lastUpdatedBy: item.last_updated_by ?? undefined,
+    }));
+  }
+
+  async updateRunCaseStatus(payload: UpdateRunCaseStatusPayload): Promise<void> {
+    await this.request('PUT', `/runs/${encodeURIComponent(payload.runKey)}/cases/${encodeURIComponent(payload.runCaseKey)}`, {
+      jsonBody: {
+        status: payload.status,
+        remark: payload.remark,
+        attachments: payload.attachments ?? [],
+      },
+    });
+  }
+
+  async listRunCaseHistory(runKey: string, runCaseKey: string): Promise<RunCaseHistory[]> {
+    const data = await this.request<
+      {
+        id: number;
+        status: RunCase['status'];
+        remark?: string | null;
+        operator: string;
+        operated_at: string;
+        attachments: { name: string; url: string; size?: number; mime?: string }[];
+      }[]
+    >('GET', `/runs/${encodeURIComponent(runKey)}/cases/${encodeURIComponent(runCaseKey)}/history`);
+    return data.map((item) => ({
+      id: String(item.id),
+      status: item.status,
+      remark: item.remark ?? undefined,
+      operator: item.operator,
+      operatedAt: item.operated_at,
+      attachments: item.attachments ?? [],
+    }));
   }
 
   async listIssues(query: IssueQuery): Promise<Issue[]> {
@@ -642,6 +1272,7 @@ export class HttpRepository implements Repository {
       jsonBody: {
         fix_version_key: payload.fixVersionKey,
         verify_version_key: payload.verifyVersionKey,
+        run_key: payload.runKey,
         regression_case_keys: payload.regressionCaseKeys,
       },
     });
@@ -763,6 +1394,7 @@ export class HttpRepository implements Repository {
         run_id: string;
         pipeline_key: string;
         pipeline_name: string;
+        repo_url?: string | null;
         branch: string;
         commit_id?: string | null;
         note?: string | null;
@@ -787,6 +1419,7 @@ export class HttpRepository implements Repository {
       runId: item.run_id,
       pipelineKey: item.pipeline_key,
       pipelineName: item.pipeline_name,
+      repoUrl: item.repo_url ?? undefined,
       branch: item.branch,
       commitId: item.commit_id ?? undefined,
       note: item.note ?? undefined,
@@ -804,6 +1437,7 @@ export class HttpRepository implements Repository {
       run_id: string;
       pipeline_key: string;
       pipeline_name: string;
+      repo_url?: string | null;
       branch: string;
       commit_id?: string | null;
       note?: string | null;
@@ -823,6 +1457,7 @@ export class HttpRepository implements Repository {
       logs: string[];
     }>('POST', `/cicd/pipelines/${encodeURIComponent(payload.pipelineKey)}/runs`, {
       jsonBody: {
+        repo_url: payload.repoUrl,
         branch: payload.branch,
         commit_id: payload.commitId,
         note: payload.note,
@@ -834,6 +1469,7 @@ export class HttpRepository implements Repository {
       runId: data.run_id,
       pipelineKey: data.pipeline_key,
       pipelineName: data.pipeline_name,
+      repoUrl: data.repo_url ?? undefined,
       branch: data.branch,
       commitId: data.commit_id ?? undefined,
       note: data.note ?? undefined,
@@ -851,6 +1487,7 @@ export class HttpRepository implements Repository {
       run_id: string;
       pipeline_key: string;
       pipeline_name: string;
+      repo_url?: string | null;
       branch: string;
       commit_id?: string | null;
       note?: string | null;
@@ -879,6 +1516,7 @@ export class HttpRepository implements Repository {
       runId: data.run_id,
       pipelineKey: data.pipeline_key,
       pipelineName: data.pipeline_name,
+      repoUrl: data.repo_url ?? undefined,
       branch: data.branch,
       commitId: data.commit_id ?? undefined,
       note: data.note ?? undefined,
@@ -888,6 +1526,42 @@ export class HttpRepository implements Repository {
       finishedAt: data.finished_at ?? undefined,
       stages: data.stages.map(toCicdStage),
       logs: data.logs,
+    };
+  }
+
+  async getCicdRunLogs(runId: string, cursor: number, limit = 200): Promise<CicdRunLogChunk> {
+    const data = await this.request<{
+      run_id: string;
+      status: CicdRun['status'];
+      finished_at?: string | null;
+      stages: {
+        stage_key: string;
+        name: string;
+        description: string;
+        command: string;
+        status: CicdStage['status'];
+        updated_at?: string | null;
+        note?: string | null;
+      }[];
+      lines: string[];
+      next_cursor: number;
+      has_more: boolean;
+    }>(
+      'GET',
+      `/cicd/runs/${encodeURIComponent(runId)}/logs${buildQuery({
+        cursor: String(cursor),
+        limit: String(limit),
+      })}`,
+    );
+
+    return {
+      runId: data.run_id,
+      status: data.status,
+      finishedAt: data.finished_at ?? undefined,
+      stages: data.stages.map(toCicdStage),
+      lines: data.lines,
+      nextCursor: data.next_cursor,
+      hasMore: data.has_more,
     };
   }
 
@@ -943,10 +1617,39 @@ export class HttpRepository implements Repository {
         started_at: string;
         finished_at?: string | null;
         logs: string[];
+        report_archive_path?: string | null;
       }[]
     >('GET', `/automation/frameworks/${encodeURIComponent(frameworkKey)}/runs`);
 
     return data.map(toAutomationRun);
+  }
+
+  async getAutomationRunLogs(runId: string, cursor: number, limit = 200): Promise<AutomationRunLogChunk> {
+    const data = await this.request<{
+      run_id: string;
+      status: AutomationRunStatus;
+      finished_at?: string | null;
+      report_archive_path?: string | null;
+      lines: string[];
+      next_cursor: number;
+      has_more: boolean;
+    }>(
+      'GET',
+      `/automation/runs/${encodeURIComponent(runId)}/logs${buildQuery({
+        cursor: String(cursor),
+        limit: String(limit),
+      })}`,
+    );
+
+    return {
+      runId: data.run_id,
+      status: data.status,
+      finishedAt: data.finished_at ?? undefined,
+      reportArchivePath: data.report_archive_path ?? undefined,
+      lines: data.lines,
+      nextCursor: data.next_cursor,
+      hasMore: data.has_more,
+    };
   }
 
   async saveAutomationConfiguration(payload: SaveAutomationConfigurationPayload): Promise<AutomationFramework> {
@@ -1055,6 +1758,7 @@ export class HttpRepository implements Repository {
       started_at: string;
       finished_at?: string | null;
       logs: string[];
+      report_archive_path?: string | null;
     }>('POST', `/automation/frameworks/${encodeURIComponent(payload.frameworkKey)}/runs`, {
       jsonBody: {
         configuration_key: payload.configurationKey,
@@ -1064,6 +1768,26 @@ export class HttpRepository implements Repository {
         triggered_by: payload.triggeredBy,
       },
     });
+
+    return toAutomationRun(data);
+  }
+
+  async cancelAutomationRun(runId: string): Promise<AutomationRun> {
+    const data = await this.request<{
+      run_id: string;
+      framework_key: string;
+      entry_name: string;
+      configuration_key: string;
+      test_suite_key: string;
+      operation_mode: AutomationOperationMode;
+      status: AutomationRunStatus;
+      note?: string | null;
+      triggered_by: string;
+      started_at: string;
+      finished_at?: string | null;
+      logs: string[];
+      report_archive_path?: string | null;
+    }>('POST', `/automation/runs/${encodeURIComponent(runId)}:cancel`);
 
     return toAutomationRun(data);
   }

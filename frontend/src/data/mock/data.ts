@@ -2,6 +2,7 @@ import type {
   AutomationFramework,
   AutomationRun,
   CaseExecutionHistory,
+  CaseTreeNode,
   CaseStatus,
   CicdPipeline,
   CicdRun,
@@ -26,6 +27,7 @@ export interface MockDatabase {
   config: ProjectConfig;
   users: User[];
   versions: Version[];
+  caseTreeNodes: CaseTreeNode[];
   cases: TestCase[];
   versionCaseStatus: Record<string, Record<string, CaseStatus>>;
   caseHistory: CaseExecutionHistory[];
@@ -88,137 +90,13 @@ export function createInitialMockDatabase(): MockDatabase {
         createdAt: daysAgo(7),
       },
     ],
-    cases: [
-      {
-        caseId: 'C-001',
-        caseKey: 'TC-001',
-        title: '用户登录成功',
-        steps: '输入正确用户名与密码，点击登录按钮',
-        expected: '跳转首页并展示用户信息',
-        module: '用户登录',
-        tags: ['登录', '核心流程'],
-        status: 'active',
-      },
-      {
-        caseId: 'C-002',
-        caseKey: 'TC-002',
-        title: '用户登录失败提示',
-        steps: '输入错误密码并提交',
-        expected: '提示密码错误且不可进入系统',
-        module: '用户登录',
-        tags: ['登录', '异常分支'],
-        status: 'active',
-      },
-      {
-        caseId: 'C-003',
-        caseKey: 'TC-003',
-        title: '用户创建成功',
-        steps: '管理员新增用户并提交',
-        expected: '列表出现新用户记录',
-        module: '用户管理',
-        tags: ['用户管理'],
-        status: 'active',
-      },
-      {
-        caseId: 'C-004',
-        caseKey: 'TC-004',
-        title: '角色权限校验',
-        steps: 'DEV 访问配置中心',
-        expected: '无权限入口不可见',
-        module: '用户管理',
-        tags: ['权限'],
-        status: 'active',
-      },
-      {
-        caseId: 'C-005',
-        caseKey: 'TC-005',
-        title: '数据导出 CSV',
-        steps: '导出当前问题单列表',
-        expected: '下载文件并包含筛选结果',
-        module: '数据导出',
-        tags: ['导出'],
-        status: 'active',
-      },
-      {
-        caseId: 'C-006',
-        caseKey: 'TC-006',
-        title: '附件上传成功',
-        steps: '上传截图并保存状态更新',
-        expected: '历史中可查看附件链接',
-        module: '数据导出',
-        tags: ['附件'],
-        status: 'active',
-      },
-    ],
+    caseTreeNodes: [],
+    cases: [],
     versionCaseStatus: {
-      'v1.0.0': {
-        'TC-001': 'passed',
-        'TC-002': 'failed',
-        'TC-003': 'passed',
-        'TC-004': 'blocked',
-        'TC-005': 'not_run',
-        'TC-006': 'skipped',
-      },
-      'v1.1.0': {
-        'TC-001': 'not_run',
-        'TC-002': 'not_run',
-        'TC-003': 'not_run',
-        'TC-004': 'not_run',
-        'TC-005': 'not_run',
-        'TC-006': 'not_run',
-      },
+      'v1.0.0': {},
+      'v1.1.0': {},
     },
-    caseHistory: [
-      {
-        id: 'H-001',
-        versionKey: 'v1.0.0',
-        caseKey: 'TC-001',
-        status: 'passed',
-        executorId: 'U-002',
-        executorName: 'qa',
-        executedAt: daysAgo(5),
-        note: '核心登录流程通过',
-        attachments: [],
-      },
-      {
-        id: 'H-002',
-        versionKey: 'v1.0.0',
-        caseKey: 'TC-002',
-        status: 'failed',
-        executorId: 'U-002',
-        executorName: 'qa',
-        executedAt: daysAgo(4),
-        note: '验证码校验异常',
-        attachments: [
-          {
-            name: 'login-fail.png',
-            url: '/uploads/mock/login-fail.png',
-          },
-        ],
-      },
-      {
-        id: 'H-003',
-        versionKey: 'v1.0.0',
-        caseKey: 'TC-004',
-        status: 'blocked',
-        executorId: 'U-002',
-        executorName: 'qa',
-        executedAt: daysAgo(3),
-        note: '环境依赖未就绪',
-        attachments: [],
-      },
-      {
-        id: 'H-004',
-        versionKey: 'v1.0.0',
-        caseKey: 'TC-006',
-        status: 'skipped',
-        executorId: 'U-002',
-        executorName: 'qa',
-        executedAt: daysAgo(2),
-        note: '本轮版本不执行',
-        attachments: [],
-      },
-    ],
+    caseHistory: [],
     issues: [
       {
         issueId: 'I-001',
@@ -290,22 +168,23 @@ export function createInitialMockDatabase(): MockDatabase {
       buildMachine: {
         name: '内网构建机',
         ip: '172.22.67.76',
-        note: '占位信息，后续由你补充构建环境和凭据',
+        note: '通过 SSH 在 /data/jinpeng/go-project-build 下执行分支目录创建与 git clone -b。',
       },
       deployTarget: {
         name: '制品分发机',
-        ip: '10.10.33.56',
-        note: '占位信息，后续补充目标目录和鉴权方式',
+        ip: '10.10.131.192',
+        note: '真实执行：构建机 scp 下发 + 目标机 SSH 校验 MD5',
       },
       buildScriptPath: '/opt/hyperchain/scripts/build_hyperchain.sh',
       artifactPath: '/opt/hyperchain/output/hyperchain',
-      deployPath: '/data/hyperchain/bin',
+      deployPath: '/home/hyperchain/dev_workspace/frigate-dynamic/bin_assets/new-hyperchain/hyperchain',
       stagesTemplate: [
         {
           stageKey: 'prepare',
-          name: '准备构建环境',
-          description: '连接构建机并准备源码、依赖和环境变量。',
-          command: 'ssh 172.22.67.76 "prepare_env.sh"',
+          name: '拉取代码',
+          description: '在构建机创建分支目录并执行 git clone -b。',
+          command:
+            'cd /data/jinpeng/go-project-build && mkdir -p {branch} && cd {branch} && git clone -b {branch} {repo_url} go-hyperchain',
         },
         {
           stageKey: 'build',
@@ -316,14 +195,16 @@ export function createInitialMockDatabase(): MockDatabase {
         {
           stageKey: 'package',
           name: '归档制品',
-          description: '收集并校验编译结果，形成发布制品。',
-          command: 'ssh 172.22.67.76 "sha256sum /opt/hyperchain/output/hyperchain"',
+          description: '读取分支 HEAD、codeVersion 与构建机 MD5，并校验版本一致性。',
+          command:
+            'cd /data/jinpeng/go-project-build/{branch}/go-hyperchain && git rev-parse HEAD && git rev-parse --short=8 HEAD && ./hyperchain --codeVersion && md5sum ./hyperchain',
         },
         {
           stageKey: 'scp',
           name: 'SCP 分发二进制',
-          description: '将二进制通过 scp 发送到目标机器指定目录。',
-          command: 'scp /opt/hyperchain/output/hyperchain user@10.10.33.56:/data/hyperchain/bin/',
+          description: '从构建机 scp 到目标机并进行双端 MD5 一致性校验。',
+          command:
+            'scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /data/jinpeng/go-project-build/{branch}/go-hyperchain/hyperchain user@10.10.131.192:/home/hyperchain/dev_workspace/frigate-dynamic/bin_assets/new-hyperchain/hyperchain',
         },
       ],
       updatedAt: minutesAgo(30),
@@ -333,6 +214,7 @@ export function createInitialMockDatabase(): MockDatabase {
         runId: 'RUN-0001',
         pipelineKey: 'hyperchain-binary',
         pipelineName: 'Hyperchain 二进制 CICD',
+        repoUrl: 'git@gitlab.example.com:hyperchain/go-hyperchain.git',
         branch: 'release/v1.0.0',
         commitId: 'placeholder-commit',
         note: '初始化占位流水线',
@@ -342,12 +224,13 @@ export function createInitialMockDatabase(): MockDatabase {
         stages: [
           {
             stageKey: 'prepare',
-            name: '准备构建环境',
-            description: '连接构建机并准备源码、依赖和环境变量。',
-            command: 'ssh 172.22.67.76 "prepare_env.sh"',
+            name: '拉取代码',
+            description: '在构建机创建分支目录并执行 git clone -b。',
+            command:
+              'cd /data/jinpeng/go-project-build && mkdir -p release/v1.0.0 && cd release/v1.0.0 && git clone -b release/v1.0.0 git@gitlab.example.com:hyperchain/go-hyperchain.git go-hyperchain',
             status: 'success',
             updatedAt: minutesAgo(18),
-            note: '占位：环境检查通过',
+            note: '占位：代码拉取完成',
           },
           {
             stageKey: 'build',
@@ -361,20 +244,22 @@ export function createInitialMockDatabase(): MockDatabase {
           {
             stageKey: 'package',
             name: '归档制品',
-            description: '收集并校验编译结果，形成发布制品。',
-            command: 'ssh 172.22.67.76 "sha256sum /opt/hyperchain/output/hyperchain"',
+            description: '读取分支 HEAD、codeVersion 与构建机 MD5，并校验版本一致性。',
+            command:
+              'cd /data/jinpeng/go-project-build/release/v1.0.0/go-hyperchain && git rev-parse HEAD && git rev-parse --short=8 HEAD && ./hyperchain --codeVersion && md5sum ./hyperchain',
             status: 'pending',
           },
           {
             stageKey: 'scp',
             name: 'SCP 分发二进制',
-            description: '将二进制通过 scp 发送到目标机器指定目录。',
-            command: 'scp /opt/hyperchain/output/hyperchain user@10.10.33.56:/data/hyperchain/bin/',
+            description: '从构建机 scp 到目标机并进行双端 MD5 一致性校验。',
+            command:
+              'scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /data/jinpeng/go-project-build/release/v1.0.0/go-hyperchain/hyperchain user@10.10.131.192:/home/hyperchain/dev_workspace/frigate-dynamic/bin_assets/new-hyperchain/hyperchain',
             status: 'pending',
           },
         ],
         logs: [
-          '[prepare] ssh 172.22.67.76: 环境准备完成（占位）',
+          '[prepare] 在分支目录执行 git clone -b 完成（占位）',
           '[build] 执行 build_hyperchain.sh（占位）',
         ],
       },
@@ -387,10 +272,10 @@ export function createInitialMockDatabase(): MockDatabase {
         frameworkType: 'performance',
         description:
           'frigateDynamic 负责自动部署压力机上的 frigate 与被测 hyperchain 二进制，并通过 SSH 触发一次性压测作业。',
-        streamlitUrl: 'http://172.22.67.76:8501',
+        streamlitUrl: 'http://10.10.131.192:8501',
         buildMachine: {
           name: '构建/调度机',
-          ip: '172.22.67.76',
+          ip: '10.10.131.192',
           note: '占位：后续补充 SSH 账号、脚本路径与网络策略',
         },
         deployTarget: {
@@ -405,7 +290,7 @@ export function createInitialMockDatabase(): MockDatabase {
             description: '占位配置，用于演示在线编辑与保存',
             content: [
               'job_name: frigate_dynamic_perf',
-              'pressure_host: 172.22.67.76',
+              'pressure_host: 10.10.131.192',
               'target_cluster_host: 10.10.33.56',
               'frigate_package_path: /data/frigate/frigate.tar.gz',
               'hyperchain_binary_path: /data/hyperchain/bin/hyperchain',
@@ -423,7 +308,7 @@ export function createInitialMockDatabase(): MockDatabase {
               'job_name: frigate_dynamic_long_run',
               'duration_min: 180',
               'rps: 1200',
-              'pressure_host: 172.22.67.76',
+              'pressure_host: 10.10.131.192',
               'target_cluster_host: 10.10.33.56',
             ].join('\n'),
             updatedAt: minutesAgo(50),
@@ -556,7 +441,7 @@ export function createInitialMockDatabase(): MockDatabase {
         triggeredBy: 'qa',
         startedAt: minutesAgo(9),
         logs: [
-          '[deploy_pressure_machine] 占位：已连接压力机 172.22.67.76',
+          '[deploy_pressure_machine] 占位：已连接压力机 10.10.131.192',
           '[deploy_hyperchain] 占位：已下发二进制到 10.10.33.56',
           '[test_only] 占位：已通过 SSH 启动 frigate 压测',
         ],

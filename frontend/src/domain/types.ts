@@ -53,6 +53,7 @@ export interface FileAttachment {
 export interface TestCase {
   caseId: string;
   caseKey: string;
+  treeNodeId?: string;
   title: string;
   steps: string;
   expected: string;
@@ -70,6 +71,30 @@ export interface CaseWithStatus extends TestCase {
 export interface ModuleCaseGroup {
   module: string;
   cases: CaseWithStatus[];
+}
+
+export type CaseTreeNodeType = 'directory' | 'file';
+
+export interface CaseTreeCase {
+  caseKey: string;
+  title: string;
+  module: string;
+  latestStatus: CaseStatus;
+}
+
+export interface CaseTreeNode {
+  nodeId: string;
+  name: string;
+  nodeType: CaseTreeNodeType;
+  parentNodeId?: string;
+  fullPath: string;
+  children: CaseTreeNode[];
+  cases: CaseTreeCase[];
+}
+
+export interface CaseTreeView {
+  versionKey: string;
+  tree: CaseTreeNode[];
 }
 
 export interface CaseExecutionHistory {
@@ -146,6 +171,158 @@ export interface UpdateCaseStatusPayload {
   attachments?: FileAttachment[];
 }
 
+export interface CreateCaseTreeNodePayload {
+  versionKey: string;
+  parentNodeId?: string;
+  name: string;
+  nodeType: CaseTreeNodeType;
+}
+
+export interface CreateCasePayload {
+  versionKey: string;
+  parentNodeId: string;
+  caseKey: string;
+  title: string;
+  steps: string;
+  expected: string;
+  tags: string[];
+}
+
+export interface UpdateCasePayload {
+  caseKey: string;
+  parentNodeId?: string;
+  title: string;
+  steps: string;
+  expected: string;
+  tags: string[];
+}
+
+export type SuiteVersionStatus = 'draft' | 'published';
+export type PlanStatus = 'draft' | 'in_progress' | 'done' | 'archived';
+export type RunStatus = 'running' | 'success' | 'failed';
+
+export interface SuiteVersion {
+  suiteVersionKey: string;
+  suiteKey: string;
+  verNo: number;
+  status: SuiteVersionStatus;
+  note?: string;
+  caseCount: number;
+  createdAt: string;
+  publishedAt?: string;
+}
+
+export interface Suite {
+  suiteKey: string;
+  versionKey: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  versions: SuiteVersion[];
+}
+
+export interface SuiteCaseSummary {
+  caseKey: string;
+  title: string;
+  module: string;
+  status: 'active' | 'deprecated';
+  issueLinked?: boolean;
+}
+
+export interface SuiteVersionDetail {
+  suiteKey: string;
+  name: string;
+  description?: string;
+  suiteVersion: SuiteVersion;
+  cases: SuiteCaseSummary[];
+}
+
+export interface CreateSuitePayload {
+  versionKey: string;
+  name: string;
+  description?: string;
+  caseKeys?: string[];
+}
+
+export interface UpdateSuitePayload {
+  suiteKey: string;
+  name: string;
+  description?: string;
+}
+
+export interface Plan {
+  planKey: string;
+  versionKey: string;
+  suiteVersionKey: string;
+  name: string;
+  description?: string;
+  status: PlanStatus;
+  createdAt: string;
+  updatedAt: string;
+  runCount: number;
+  passRate?: number | null;
+}
+
+export interface CreatePlanPayload {
+  versionKey: string;
+  suiteVersionKey: string;
+  name: string;
+  description?: string;
+}
+
+export interface Run {
+  runKey: string;
+  planKey: string;
+  versionKey: string;
+  name: string;
+  buildNo?: string;
+  environment?: string;
+  status: RunStatus;
+  createdAt: string;
+  startedAt: string;
+  finishedAt?: string;
+  passRate?: number | null;
+  executedCases: number;
+  totalCases: number;
+}
+
+export interface RunCase {
+  runCaseKey: string;
+  caseKey: string;
+  title: string;
+  module: string;
+  steps: string;
+  expected: string;
+  status: CaseStatus;
+  lastUpdatedAt: string;
+  lastUpdatedBy?: string;
+}
+
+export interface RunCaseHistory {
+  id: string;
+  status: CaseStatus;
+  remark?: string;
+  operator: string;
+  operatedAt: string;
+  attachments: FileAttachment[];
+}
+
+export interface CreateRunPayload {
+  name: string;
+  buildNo?: string;
+  environment?: string;
+  caseKeys?: string[];
+}
+
+export interface UpdateRunCaseStatusPayload {
+  runKey: string;
+  runCaseKey: string;
+  status: CaseStatus;
+  remark?: string;
+  attachments?: FileAttachment[];
+}
+
 export interface CreateIssuePayload {
   title: string;
   description: string;
@@ -159,7 +336,8 @@ export interface CreateIssuePayload {
 
 export interface CloseIssuePayload {
   fixVersionKey: string;
-  verifyVersionKey: string;
+  verifyVersionKey?: string;
+  runKey?: string;
   regressionCaseKeys: string[];
 }
 
@@ -214,6 +392,7 @@ export interface CicdRun {
   runId: string;
   pipelineKey: string;
   pipelineName: string;
+  repoUrl?: string;
   branch: string;
   commitId?: string;
   note?: string;
@@ -227,6 +406,7 @@ export interface CicdRun {
 
 export interface TriggerCicdRunPayload {
   pipelineKey: string;
+  repoUrl: string;
   branch: string;
   commitId?: string;
   note?: string;
@@ -240,9 +420,19 @@ export interface UpdateCicdStagePayload {
   note?: string;
 }
 
+export interface CicdRunLogChunk {
+  runId: string;
+  status: CicdRunStatus;
+  finishedAt?: string;
+  stages: CicdStage[];
+  lines: string[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
 export type AutomationFrameworkKey = 'frigateDynamic' | 'hypersonic';
 export type AutomationFrameworkType = 'performance' | 'functional';
-export type AutomationRunStatus = 'pending' | 'running' | 'success' | 'failed';
+export type AutomationRunStatus = 'pending' | 'running' | 'success' | 'failed' | 'canceled';
 export type AutomationOperationMode =
   | 'deploy_pressure_machine'
   | 'deploy_hyperchain'
@@ -302,6 +492,17 @@ export interface AutomationRun {
   startedAt: string;
   finishedAt?: string;
   logs: string[];
+  reportArchivePath?: string;
+}
+
+export interface AutomationRunLogChunk {
+  runId: string;
+  status: AutomationRunStatus;
+  finishedAt?: string;
+  reportArchivePath?: string;
+  lines: string[];
+  nextCursor: number;
+  hasMore: boolean;
 }
 
 export interface SaveAutomationConfigurationPayload {

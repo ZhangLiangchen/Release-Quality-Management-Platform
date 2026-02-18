@@ -96,8 +96,8 @@ def set_current_version(
     db: Session = Depends(get_db),
     current_user: UserAccount = Depends(get_current_user),
 ):
-    if current_user.role != UserRole.admin:
-        raise AppError("FORBIDDEN", "仅管理员可设置系统当前版本", status_code=403)
+    if current_user.role not in {UserRole.admin, UserRole.qa}:
+        raise AppError("FORBIDDEN", "仅管理员或 QA 可设置系统当前版本", status_code=403)
 
     version = find_version_by_key(db, version_key)
     db.query(Version).update({Version.is_current: False})

@@ -1,7 +1,17 @@
 import type {
   AutomationFramework,
   AutomationRun,
+  AutomationRunLogChunk,
+  CaseTreeNode,
+  CreatePlanPayload,
+  CreateRunPayload,
+  CreateSuitePayload,
+  UpdateSuitePayload,
+  CreateCasePayload,
+  UpdateCasePayload,
+  CreateCaseTreeNodePayload,
   CaseDetail,
+  CicdRunLogChunk,
   CicdPipeline,
   CicdRun,
   CloseIssuePayload,
@@ -13,10 +23,18 @@ import type {
   LoginPayload,
   LoginResult,
   ModuleCaseGroup,
+  Plan,
   ProjectConfig,
+  Run,
+  RunCase,
+  RunCaseHistory,
   SaveAutomationConfigurationPayload,
   SaveAutomationTestSuitePayload,
+  Suite,
+  SuiteVersion,
+  SuiteVersionDetail,
   UpdateCaseStatusPayload,
+  UpdateRunCaseStatusPayload,
   UpdateCicdStagePayload,
   TriggerAutomationRunPayload,
   User,
@@ -41,8 +59,36 @@ export interface Repository {
   deleteUser(userId: string): Promise<void>;
 
   listCases(versionKey: string): Promise<ModuleCaseGroup[]>;
+  listCaseTree(versionKey: string): Promise<CaseTreeNode[]>;
+  createCaseTreeNode(payload: CreateCaseTreeNodePayload): Promise<CaseTreeNode>;
+  createCase(payload: CreateCasePayload): Promise<void>;
+  updateCase(payload: UpdateCasePayload): Promise<void>;
+  deleteCase(caseKey: string): Promise<void>;
   getCaseDetail(versionKey: string, caseKey: string): Promise<CaseDetail>;
   updateCaseStatus(payload: UpdateCaseStatusPayload, operator: User): Promise<void>;
+
+  listSuites(versionKey: string): Promise<Suite[]>;
+  createSuite(payload: CreateSuitePayload): Promise<Suite>;
+  updateSuite(payload: UpdateSuitePayload): Promise<Suite>;
+  deleteSuite(suiteKey: string, suiteVersionKey: string): Promise<void>;
+  getSuiteVersionDetail(suiteKey: string, suiteVersionKey: string): Promise<SuiteVersionDetail>;
+  deriveSuiteVersion(suiteKey: string, note?: string): Promise<SuiteVersion>;
+  publishSuiteVersion(suiteKey: string, suiteVersionKey: string): Promise<SuiteVersion>;
+  addSuiteCases(suiteKey: string, suiteVersionKey: string, caseKeys: string[]): Promise<void>;
+  removeSuiteCases(suiteKey: string, suiteVersionKey: string, caseKeys: string[]): Promise<void>;
+
+  listPlans(versionKey: string): Promise<Plan[]>;
+  createPlan(payload: CreatePlanPayload): Promise<Plan>;
+  deletePlan(planKey: string): Promise<void>;
+  getPlanDetail(planKey: string): Promise<{ plan: Plan; runs: Run[] }>;
+  createRun(planKey: string, payload: CreateRunPayload): Promise<Run>;
+
+  listRuns(versionKey: string): Promise<Run[]>;
+  getLatestRun(versionKey: string): Promise<Run>;
+  getRunDetail(runKey: string): Promise<Run>;
+  listRunCases(runKey: string, status?: RunCase['status'], keyword?: string): Promise<RunCase[]>;
+  updateRunCaseStatus(payload: UpdateRunCaseStatusPayload): Promise<void>;
+  listRunCaseHistory(runKey: string, runCaseKey: string): Promise<RunCaseHistory[]>;
 
   listIssues(query: IssueQuery): Promise<Issue[]>;
   createIssue(payload: CreateIssuePayload): Promise<Issue>;
@@ -61,9 +107,12 @@ export interface Repository {
   listCicdRuns(pipelineKey: string): Promise<CicdRun[]>;
   triggerCicdRun(payload: TriggerCicdRunPayload): Promise<CicdRun>;
   updateCicdStage(payload: UpdateCicdStagePayload): Promise<CicdRun>;
+  getCicdRunLogs(runId: string, cursor: number, limit?: number): Promise<CicdRunLogChunk>;
 
   getAutomationFramework(frameworkKey: string): Promise<AutomationFramework>;
   listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]>;
+  getAutomationRunLogs(runId: string, cursor: number, limit?: number): Promise<AutomationRunLogChunk>;
+  cancelAutomationRun(runId: string): Promise<AutomationRun>;
   saveAutomationConfiguration(payload: SaveAutomationConfigurationPayload): Promise<AutomationFramework>;
   saveAutomationTestSuite(payload: SaveAutomationTestSuitePayload): Promise<AutomationFramework>;
   triggerAutomationRun(payload: TriggerAutomationRunPayload): Promise<AutomationRun>;

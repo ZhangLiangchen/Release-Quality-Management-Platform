@@ -8,6 +8,8 @@ from ..auth import get_current_user
 from ..database import (
     CaseStatus,
     CaseStatusHistory,
+    CaseTreeNode,
+    CaseTreeNodeType,
     TestCase,
     TestCaseStatus,
     UserAccount,
@@ -18,22 +20,45 @@ from ..database import (
 )
 from ..errors import AppError
 from ..response import success_response
-from ..schemas import CaseDetailOut, CaseStatusUpdateRequest, ImportValidateOut
+from ..schemas import (
+    CaseCreateRequest,
+    CaseDetailOut,
+    CaseStatusUpdateRequest,
+    CaseTreeNodeCreateRequest,
+    CaseUpdateRequest,
+    ImportValidateOut,
+)
 from ..services import (
     as_csv_response,
     as_xlsx_response,
     build_case_history_rows,
     build_case_module_rows,
+    build_case_tree_rows,
+    ensure_case_tree_nodes_for_legacy_cases,
     ensure_version_case_status_rows,
     find_case_by_key,
+    find_case_tree_node_by_node_id,
+    find_or_create_case_tree_node,
     find_version_by_key,
     get_or_create_default_snapshot,
     parse_import_rows,
+    split_case_module_path,
     validate_required_columns,
     write_audit,
 )
 
 router = APIRouter(tags=["cases"])
+
+
+def _next_case_id(db: Session) -> str:
+    count = db.query(func.count(TestCase.id)).scalar() or 0
+    seq = int(count) + 1
+    while True:
+        case_id = f"HSC-{seq:07d}"
+        exists = db.query(TestCase).filter(TestCase.case_id == case_id).first()
+        if not exists:
+            return case_id
+        seq += 1
 
 
 @router.get("/api/v1/cases")
@@ -54,6 +79,255 @@ def list_cases(
 
     data = build_case_module_rows(db, version)
     return success_response(request, data)
+
+
+@router.get("/api/v1/case-tree")
+def list_case_tree(
+    request: Request,
+    version_key: str,
+    db: Session = Depends(get_db),
+    _: UserAccount = Depends(get_current_user),
+):
+    version = find_version_by_key(db, version_key)
+    tree = build_case_tree_rows(db, version)
+    db.commit()
+    return success_response(
+        request,
+        {
+            "version_key": version_key,
+            "tree": tree,
+        },
+    )
+
+
+@router.post("/api/v1/case-tree/nodes")
+def create_case_tree_node(
+    payload: CaseTreeNodeCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.admin, UserRole.qa}:
+        raise AppError("FORBIDDEN", "仅管理员或 QA 可新增目录", status_code=403)
+
+    find_version_by_key(db, payload.version_key)
+    parent = find_case_tree_node_by_node_id(db, payload.parent_node_id) if payload.parent_node_id else None
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise AppError("VALIDATION_ERROR", "目录名不能为空", status_code=422)
+
+    if parent and parent.node_type != CaseTreeNodeType.directory:
+        raise AppError("VALIDATION_ERROR", "仅目录节点可新增子目录", status_code=422)
+
+    full_path = normalized_name if not parent else f"{parent.full_path}/{normalized_name}"
+    exists = db.query(CaseTreeNode).filter(CaseTreeNode.full_path == full_path).first()
+    if exists:
+        raise AppError("VALIDATION_ERROR", "同级目录重名", status_code=422)
+
+    node = find_or_create_case_tree_node(
+        db,
+        name=normalized_name,
+        node_type=payload.node_type,
+        parent=parent,
+    )
+
+    write_audit(
+        db,
+        current_user.id,
+        action="case.tree.node.create",
+        object_type="case_tree_node",
+        object_id=node.node_id,
+        diff={
+            "parent_node_id": parent.node_id if parent else None,
+            "name": node.name,
+            "node_type": node.node_type.value,
+            "full_path": node.full_path,
+        },
+    )
+
+    db.commit()
+    return success_response(
+        request,
+        {
+            "node_id": node.node_id,
+            "name": node.name,
+            "node_type": node.node_type,
+            "parent_node_id": parent.node_id if parent else None,
+            "full_path": node.full_path,
+        },
+    )
+
+
+@router.post("/api/v1/cases")
+def create_case(
+    payload: CaseCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.admin, UserRole.qa}:
+        raise AppError("FORBIDDEN", "仅管理员或 QA 可新增用例", status_code=403)
+
+    find_version_by_key(db, payload.version_key)
+    parent = find_case_tree_node_by_node_id(db, payload.parent_node_id)
+    if parent.node_type not in {CaseTreeNodeType.directory, CaseTreeNodeType.file}:
+        raise AppError("VALIDATION_ERROR", "父节点类型不支持挂载用例", status_code=422)
+
+    case_key = payload.case_key.strip()
+    if not case_key:
+        raise AppError("VALIDATION_ERROR", "用例编号不能为空", status_code=422)
+
+    existing = db.query(TestCase).filter(TestCase.case_key == case_key).first()
+    if existing:
+        raise AppError("VALIDATION_ERROR", f"用例编号已存在: {case_key}", status_code=422)
+
+    path_parts = split_case_module_path(parent.full_path)
+    module = path_parts[0] if len(path_parts) == 1 else "/".join(path_parts[:2])
+
+    test_case = TestCase(
+        case_id=_next_case_id(db),
+        case_key=case_key,
+        tree_node_id=parent.id,
+        module=module,
+        title=payload.title.strip(),
+        steps=payload.steps.strip(),
+        expected=payload.expected.strip(),
+        tags_json=[item.strip() for item in payload.tags if item.strip()],
+        status=TestCaseStatus.active,
+    )
+    db.add(test_case)
+    db.flush()
+    ensure_case_tree_nodes_for_legacy_cases(db)
+
+    versions = db.query(Version).all()
+    for row in versions:
+        snapshot = get_or_create_default_snapshot(db, row, current_user.id)
+        ensure_version_case_status_rows(db, row, snapshot, current_user.id)
+
+    write_audit(
+        db,
+        current_user.id,
+        action="case.create",
+        object_type="test_case",
+        object_id=test_case.case_key,
+        diff={
+            "tree_node_id": parent.node_id,
+            "module": test_case.module,
+            "title": test_case.title,
+        },
+    )
+
+    db.commit()
+    return success_response(
+        request,
+        {
+            "case_key": case_key,
+            "title": test_case.title,
+            "module": test_case.module,
+            "tree_node_id": parent.node_id,
+        },
+    )
+
+
+@router.put("/api/v1/cases/{case_key}")
+def update_case(
+    case_key: str,
+    payload: CaseUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.admin, UserRole.qa}:
+        raise AppError("FORBIDDEN", "仅管理员或 QA 可更新用例", status_code=403)
+
+    test_case = find_case_by_key(db, case_key)
+    if test_case.status != TestCaseStatus.active:
+        raise AppError("VALIDATION_ERROR", "已废弃用例不可编辑", status_code=422)
+
+    parent = None
+    if payload.parent_node_id:
+        parent = find_case_tree_node_by_node_id(db, payload.parent_node_id)
+        if parent.node_type not in {CaseTreeNodeType.directory, CaseTreeNodeType.file}:
+            raise AppError("VALIDATION_ERROR", "父节点类型不支持挂载用例", status_code=422)
+
+    before = {
+        "tree_node_id": test_case.tree_node_id,
+        "module": test_case.module,
+        "title": test_case.title,
+        "steps": test_case.steps,
+        "expected": test_case.expected,
+        "tags": test_case.tags_json,
+    }
+
+    if parent:
+        path_parts = split_case_module_path(parent.full_path)
+        module = path_parts[0] if len(path_parts) == 1 else "/".join(path_parts[:2])
+        test_case.tree_node_id = parent.id
+        test_case.module = module
+
+    test_case.title = payload.title.strip()
+    test_case.steps = payload.steps.strip()
+    test_case.expected = payload.expected.strip()
+    test_case.tags_json = [item.strip() for item in payload.tags if item.strip()]
+
+    write_audit(
+        db,
+        current_user.id,
+        action="case.update",
+        object_type="test_case",
+        object_id=test_case.case_key,
+        diff={
+            "before": before,
+            "after": {
+                "tree_node_id": test_case.tree_node_id,
+                "module": test_case.module,
+                "title": test_case.title,
+                "steps": test_case.steps,
+                "expected": test_case.expected,
+                "tags": test_case.tags_json,
+            },
+        },
+    )
+
+    db.commit()
+    return success_response(
+        request,
+        {
+            "case_key": test_case.case_key,
+            "title": test_case.title,
+            "module": test_case.module,
+            "tree_node_id": parent.node_id if parent else None,
+        },
+    )
+
+
+@router.delete("/api/v1/cases/{case_key}")
+def delete_case(
+    case_key: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.admin, UserRole.qa}:
+        raise AppError("FORBIDDEN", "仅管理员或 QA 可删除用例", status_code=403)
+
+    test_case = find_case_by_key(db, case_key)
+    if test_case.status == TestCaseStatus.deprecated:
+        return success_response(request, {"case_key": case_key, "deleted": True, "already_deprecated": True})
+
+    test_case.status = TestCaseStatus.deprecated
+
+    write_audit(
+        db,
+        current_user.id,
+        action="case.delete",
+        object_type="test_case",
+        object_id=test_case.case_key,
+        diff={"status": "deprecated"},
+    )
+
+    db.commit()
+    return success_response(request, {"case_key": case_key, "deleted": True})
 
 
 @router.get("/api/v1/cases/{case_key}")

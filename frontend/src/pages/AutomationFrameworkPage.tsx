@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSession } from '../app/SessionContext';
 import type {
   AutomationFramework,
+  AutomationHypersonicRuntimeSettings,
   AutomationOperationMode,
   AutomationRun,
   AutomationRunStatus,
@@ -40,6 +41,10 @@ const RUN_STATUS_COLOR: Record<AutomationRunStatus, string> = {
   failed: 'error',
   canceled: 'warning',
 };
+
+type HypersonicExecContainerMode = 'default' | 'custom' | 'empty';
+
+const HYPERSONIC_DEFAULT_EXEC_CONTAINER = 'hypersonic_debug';
 
 interface AutomationFrameworkPageProps {
   frameworkKey: AutomationFramework['frameworkKey'];
@@ -78,20 +83,60 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
   const [configContent, setConfigContent] = useState('');
   const [suiteContent, setSuiteContent] = useState('');
   const [runNote, setRunNote] = useState('');
+  const [hypersonicRuntime, setHypersonicRuntime] = useState<AutomationHypersonicRuntimeSettings | null>(null);
+  const [hypersonicLiveEnabled, setHypersonicLiveEnabled] = useState(false);
+  const [hypersonicExecMode, setHypersonicExecMode] = useState<HypersonicExecContainerMode>('default');
+  const [hypersonicCustomContainerName, setHypersonicCustomContainerName] = useState('');
+  const [savingHypersonicRuntime, setSavingHypersonicRuntime] = useState(false);
   const logCursorByRunIdRef = useRef<Record<string, number>>({});
   const runLogContainerRef = useRef<HTMLDivElement | null>(null);
 
   const canOperate = user?.role !== 'viewer';
 
+  const applyHypersonicRuntimeState = (settings: AutomationHypersonicRuntimeSettings) => {
+    setHypersonicRuntime(settings);
+    setHypersonicLiveEnabled(settings.liveEnabled);
+
+    const containerName = settings.execContainerName.trim();
+    if (!containerName) {
+      setHypersonicExecMode('empty');
+      setHypersonicCustomContainerName('');
+      return;
+    }
+
+    if (containerName === HYPERSONIC_DEFAULT_EXEC_CONTAINER) {
+      setHypersonicExecMode('default');
+      setHypersonicCustomContainerName('');
+      return;
+    }
+
+    setHypersonicExecMode('custom');
+    setHypersonicCustomContainerName(containerName);
+  };
+
   const loadData = async () => {
     setLoading(true);
     try {
-      const [nextFramework, nextRuns] = await Promise.all([
+      const [nextFramework, nextRuns, nextHypersonicRuntime] = await Promise.all([
         repository.getAutomationFramework(frameworkKey),
         repository.listAutomationRuns(frameworkKey),
+        frameworkKey === 'hypersonic'
+          ? repository.getHypersonicRuntimeSettings().catch((error) => {
+              console.error(error);
+              return null;
+            })
+          : Promise.resolve(null),
       ]);
       setFramework(nextFramework);
       setRuns(nextRuns);
+      if (nextHypersonicRuntime) {
+        applyHypersonicRuntimeState(nextHypersonicRuntime);
+      } else {
+        setHypersonicRuntime(null);
+        setHypersonicLiveEnabled(false);
+        setHypersonicExecMode('default');
+        setHypersonicCustomContainerName('');
+      }
       nextRuns.forEach((run) => {
         const previousCursor = logCursorByRunIdRef.current[run.runId] ?? 0;
         logCursorByRunIdRef.current[run.runId] = Math.max(previousCursor, run.logs.length);
@@ -149,6 +194,16 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
     [framework, selectedSuiteKey],
   );
   const selectedRun = useMemo(() => runs.find((item) => item.runId === selectedRunId) ?? null, [runs, selectedRunId]);
+  const isHypersonic = framework?.frameworkKey === 'hypersonic';
+  const effectiveConfigKey = useMemo(() => {
+    if (!framework) {
+      return selectedConfigKey;
+    }
+    if (framework.frameworkKey === 'hypersonic') {
+      return framework.configurations[0]?.configKey ?? selectedConfigKey;
+    }
+    return selectedConfigKey;
+  }, [framework, selectedConfigKey]);
 
   useEffect(() => {
     setConfigContent(selectedConfig?.content ?? '');
@@ -257,7 +312,6 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
       setSavingConfig(false);
     }
   };
-
   const saveSuite = async () => {
     if (!framework || !selectedSuiteKey || !user) {
       return;
@@ -280,9 +334,47 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
     }
   };
 
+  const saveHypersonicRuntime = async () => {
+    if (!canOperate) {
+      return;
+    }
+
+    const execContainerName =
+      hypersonicExecMode === 'default'
+        ? HYPERSONIC_DEFAULT_EXEC_CONTAINER
+        : hypersonicExecMode === 'custom'
+          ? hypersonicCustomContainerName.trim()
+          : '';
+
+    if (hypersonicExecMode === 'custom' && !execContainerName) {
+      message.warning('自定义容器名不能为空；如需清空请选择“空值”');
+      return;
+    }
+
+    setSavingHypersonicRuntime(true);
+    try {
+      const updatedRuntime = await repository.updateHypersonicRuntimeSettings({
+        liveEnabled: hypersonicLiveEnabled,
+        execContainerName,
+      });
+      applyHypersonicRuntimeState(updatedRuntime);
+      const nextFramework = await repository.getAutomationFramework('hypersonic');
+      setFramework(nextFramework);
+      message.success('Hypersonic 运行参数已更新');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '更新运行参数失败');
+    } finally {
+      setSavingHypersonicRuntime(false);
+    }
+  };
+
   const triggerRun = async () => {
-    if (!framework || !selectedConfigKey || !selectedSuiteKey || !operationMode || !user) {
-      message.warning('请先选择配置、测试套与执行模式');
+    if (!framework || !selectedSuiteKey || !operationMode || !user) {
+      message.warning('请先选择测试套与执行模式');
+      return;
+    }
+    if (!effectiveConfigKey) {
+      message.error('未找到可用配置，请联系管理员检查后端配置');
       return;
     }
 
@@ -290,7 +382,7 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
     try {
       const created = await repository.triggerAutomationRun({
         frameworkKey: framework.frameworkKey,
-        configurationKey: selectedConfigKey,
+        configurationKey: effectiveConfigKey,
         testSuiteKey: selectedSuiteKey,
         operationMode,
         note: runNote.trim() || undefined,
@@ -349,29 +441,36 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
       </div>
 
       <Row gutter={16}>
-        <Col xs={24} xl={12}>
-          <Card title="Configuration 选择与在线编辑" loading={loading}>
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Select
-                value={selectedConfigKey ?? undefined}
-                onChange={setSelectedConfigKey}
-                options={(framework?.configurations ?? []).map((item) => ({
-                  label: `${item.name} (${item.configKey})`,
-                  value: item.configKey,
-                }))}
-              />
-              {selectedConfig && (
-                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  {selectedConfig.description} | 最近更新：{toLocalTime(selectedConfig.updatedAt)} by {selectedConfig.updatedBy}
-                </Paragraph>
-              )}
-              <Input.TextArea rows={14} value={configContent} onChange={(event) => setConfigContent(event.target.value)} />
-              <Button type="primary" loading={savingConfig} disabled={!canOperate || !selectedConfig} onClick={() => void saveConfig()}>
-                保存配置文件
-              </Button>
-            </Space>
-          </Card>
-        </Col>
+        {!isHypersonic && (
+          <Col xs={24} xl={12}>
+            <Card title="Configuration 选择与在线编辑" loading={loading}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Select
+                  value={selectedConfigKey ?? undefined}
+                  onChange={setSelectedConfigKey}
+                  options={(framework?.configurations ?? []).map((item) => ({
+                    label: `${item.name} (${item.configKey})`,
+                    value: item.configKey,
+                  }))}
+                />
+                {selectedConfig && (
+                  <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                    {selectedConfig.description} | 最近更新：{toLocalTime(selectedConfig.updatedAt)} by {selectedConfig.updatedBy}
+                  </Paragraph>
+                )}
+                <Input.TextArea rows={14} value={configContent} onChange={(event) => setConfigContent(event.target.value)} />
+                <Button
+                  type="primary"
+                  loading={savingConfig}
+                  disabled={!canOperate || !selectedConfig}
+                  onClick={() => void saveConfig()}
+                >
+                  保存配置文件
+                </Button>
+              </Space>
+            </Card>
+          </Col>
+        )}
 
         <Col xs={24} xl={12}>
           <Card title="TestSuite 选择与在线编辑" loading={loading}>
@@ -396,6 +495,76 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
             </Space>
           </Card>
         </Col>
+        {isHypersonic && (
+          <Col xs={24} xl={12}>
+            <Card title="Hypersonic 运行通道参数" loading={loading}>
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                <div>
+                  <Text strong>HYPERSONIC_LIVE_ENABLED</Text>
+                  <Radio.Group
+                    style={{ display: 'block', marginTop: 8 }}
+                    value={hypersonicLiveEnabled}
+                    onChange={(event) => setHypersonicLiveEnabled(Boolean(event.target.value))}
+                  >
+                    <Space direction="vertical">
+                      <Radio value={true}>true（走 SSH 远端执行）</Radio>
+                      <Radio value={false}>false（走本地执行）</Radio>
+                    </Space>
+                  </Radio.Group>
+                </div>
+
+                <div>
+                  <Text strong>HYPERSONIC_EXEC_CONTAINER_NAME</Text>
+                  <Radio.Group
+                    style={{ display: 'block', marginTop: 8 }}
+                    value={hypersonicExecMode}
+                    onChange={(event) => setHypersonicExecMode(event.target.value as HypersonicExecContainerMode)}
+                  >
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <Radio value="default">默认值：{HYPERSONIC_DEFAULT_EXEC_CONTAINER}</Radio>
+                      <Radio value="custom">自定义容器名</Radio>
+                      <Radio value="empty">空值</Radio>
+                    </Space>
+                  </Radio.Group>
+                  {hypersonicExecMode === 'custom' && (
+                    <Input
+                      style={{ marginTop: 8 }}
+                      value={hypersonicCustomContainerName}
+                      onChange={(event) => setHypersonicCustomContainerName(event.target.value)}
+                      placeholder="输入容器名，例如 hypersonic_debug 或其他容器"
+                    />
+                  )}
+                </div>
+
+                <Space>
+                  <Button
+                    type="primary"
+                    loading={savingHypersonicRuntime}
+                    disabled={!canOperate}
+                    onClick={() => void saveHypersonicRuntime()}
+                  >
+                    应用运行参数
+                  </Button>
+                  {!canOperate && <Text type="secondary">Viewer 角色仅可查看，不可修改。</Text>}
+                </Space>
+
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  {`HYPERSONIC_LIVE_ENABLED：决定执行通道
+true：走 SSH 远端执行
+false：走本地执行
+HYPERSONIC_EXEC_CONTAINER_NAME：决定是否在“已有容器”里执行，以及容器名是什么
+有值：走 docker exec <container>
+为空：在 LIVE=true 时走 docker run（每 run 独立容器）；在 LIVE=false 时当前实现会报配置错误`}
+                </Paragraph>
+                {hypersonicRuntime && (
+                  <Text type="secondary">
+                    当前后端解析：{hypersonicRuntime.executionNote}
+                  </Text>
+                )}
+              </Space>
+            </Card>
+          </Col>
+        )}
       </Row>
 
       <Card title="执行测试">
@@ -446,7 +615,7 @@ export function AutomationFrameworkPage({ frameworkKey, defaultTitle }: Automati
           }}
           columns={[
             { title: 'Run ID', dataIndex: 'runId', key: 'runId', width: 120 },
-            { title: '配置', dataIndex: 'configurationKey', key: 'configurationKey', width: 150 },
+            ...(isHypersonic ? [] : [{ title: '配置', dataIndex: 'configurationKey', key: 'configurationKey', width: 150 }]),
             { title: '测试套', dataIndex: 'testSuiteKey', key: 'testSuiteKey', width: 170 },
             {
               title: '执行模式',

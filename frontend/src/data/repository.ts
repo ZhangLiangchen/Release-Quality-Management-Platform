@@ -1,5 +1,6 @@
 import type {
   AutomationFramework,
+  AutomationHypersonicRuntimeSettings,
   AutomationRun,
   AutomationRunLogChunk,
   CaseTreeNode,
@@ -110,6 +111,10 @@ export interface Repository {
   getCicdRunLogs(runId: string, cursor: number, limit?: number): Promise<CicdRunLogChunk>;
 
   getAutomationFramework(frameworkKey: string): Promise<AutomationFramework>;
+  getHypersonicRuntimeSettings(): Promise<AutomationHypersonicRuntimeSettings>;
+  updateHypersonicRuntimeSettings(
+    payload: Pick<AutomationHypersonicRuntimeSettings, 'liveEnabled' | 'execContainerName'>,
+  ): Promise<AutomationHypersonicRuntimeSettings>;
   listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]>;
   getAutomationRunLogs(runId: string, cursor: number, limit?: number): Promise<AutomationRunLogChunk>;
   cancelAutomationRun(runId: string): Promise<AutomationRun>;

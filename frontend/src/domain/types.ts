@@ -505,6 +505,13 @@ export interface AutomationRunLogChunk {
   hasMore: boolean;
 }
 
+export interface AutomationHypersonicRuntimeSettings {
+  liveEnabled: boolean;
+  execContainerName: string;
+  executionRoute: 'ssh_exec' | 'local_exec' | 'ssh_run' | 'local_config_error';
+  executionNote: string;
+}
+
 export interface SaveAutomationConfigurationPayload {
   frameworkKey: AutomationFrameworkKey;
   configKey: string;

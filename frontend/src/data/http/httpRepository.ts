@@ -1,6 +1,7 @@
 import Papa from 'papaparse';
 import type {
   AutomationFramework,
+  AutomationHypersonicRuntimeSettings,
   AutomationOperationMode,
   AutomationRun,
   AutomationRunLogChunk,
@@ -408,6 +409,20 @@ function toAutomationRun(row: {
     finishedAt: row.finished_at ?? undefined,
     logs: row.logs ?? [],
     reportArchivePath: row.report_archive_path ?? undefined,
+  };
+}
+
+function toAutomationHypersonicRuntimeSettings(row: {
+  live_enabled: boolean;
+  exec_container_name: string;
+  execution_route: 'ssh_exec' | 'local_exec' | 'ssh_run' | 'local_config_error';
+  execution_note: string;
+}): AutomationHypersonicRuntimeSettings {
+  return {
+    liveEnabled: row.live_enabled,
+    execContainerName: row.exec_container_name ?? '',
+    executionRoute: row.execution_route,
+    executionNote: row.execution_note,
   };
 }
 
@@ -1600,6 +1615,35 @@ export class HttpRepository implements Repository {
     }>('GET', `/automation/frameworks/${encodeURIComponent(frameworkKey)}`);
 
     return toAutomationFramework(data);
+  }
+
+  async getHypersonicRuntimeSettings(): Promise<AutomationHypersonicRuntimeSettings> {
+    const data = await this.request<{
+      live_enabled: boolean;
+      exec_container_name: string;
+      execution_route: 'ssh_exec' | 'local_exec' | 'ssh_run' | 'local_config_error';
+      execution_note: string;
+    }>('GET', '/automation/frameworks/hypersonic/runtime');
+    return toAutomationHypersonicRuntimeSettings(data);
+  }
+
+  async updateHypersonicRuntimeSettings(
+    payload: Pick<AutomationHypersonicRuntimeSettings, 'liveEnabled' | 'execContainerName'>,
+  ): Promise<AutomationHypersonicRuntimeSettings> {
+    const data = await this.request<{
+      runtime: {
+        live_enabled: boolean;
+        exec_container_name: string;
+        execution_route: 'ssh_exec' | 'local_exec' | 'ssh_run' | 'local_config_error';
+        execution_note: string;
+      };
+    }>('PUT', '/automation/frameworks/hypersonic/runtime', {
+      jsonBody: {
+        live_enabled: payload.liveEnabled,
+        exec_container_name: payload.execContainerName,
+      },
+    });
+    return toAutomationHypersonicRuntimeSettings(data.runtime);
   }
 
   async listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]> {

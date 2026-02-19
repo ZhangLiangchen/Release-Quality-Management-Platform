@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.local
+    environment:
+      HYPERSONIC_LIVE_ENABLED: ${HYPERSONIC_LIVE_ENABLED:-false}
+      HYPERSONIC_CI_LIST_PATH: /workspace/hypersonic/scripts/ci_list.json
+      HYPERSONIC_REMOTE_REPO_DIR: /Users/zhangliangchen/PycharmProjects/hypersonic-dev/hypersonic
+      HYPERSONIC_EXEC_CONTAINER_NAME: ${HYPERSONIC_EXEC_CONTAINER_NAME:-hypersonic_debug}
+    volumes:
+      - /Users/zhangliangchen/PycharmProjects/hypersonic-dev/hypersonic:/workspace/hypersonic:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.local
+
+  nginx:
+    image: nginx:1.27-alpine

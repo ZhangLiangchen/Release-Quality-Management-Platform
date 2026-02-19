@@ -1,5 +1,6 @@
 import type {
   AutomationFramework,
+  AutomationHypersonicRuntimeSettings,
   AutomationRun,
   CaseExecutionHistory,
   CaseTreeNode,
@@ -36,6 +37,7 @@ export interface MockDatabase {
   cicdRuns: CicdRun[];
   automationFrameworks: AutomationFramework[];
   automationRuns: AutomationRun[];
+  hypersonicRuntimeSettings: AutomationHypersonicRuntimeSettings;
 }
 
 export function createInitialMockDatabase(): MockDatabase {
@@ -461,5 +463,11 @@ export function createInitialMockDatabase(): MockDatabase {
         logs: ['[functional_test] 占位：执行 42 条用例，42 通过，0 失败'],
       },
     ],
+    hypersonicRuntimeSettings: {
+      liveEnabled: false,
+      execContainerName: 'hypersonic_debug',
+      executionRoute: 'local_exec',
+      executionNote: '执行入口：本机 docker exec（固定容器：hypersonic_debug）',
+    },
   };
 }

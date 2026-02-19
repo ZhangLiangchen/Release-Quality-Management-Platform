@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import select
+import shutil
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -13,7 +17,7 @@ from typing import Any, Literal, Optional
 import paramiko
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
@@ -60,6 +64,11 @@ class TriggerAutomationRunRequest(BaseModel):
     triggered_by: str = Field(min_length=1)
 
 
+class UpdateHypersonicRuntimeRequest(BaseModel):
+    live_enabled: bool
+    exec_container_name: str | None = None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -73,6 +82,7 @@ _LOCK = RLock()
 _MAX_RUN_LOG_LINES = 2000
 _TERMINAL_STATUSES = {AutomationRunStatus.success, AutomationRunStatus.failed, AutomationRunStatus.canceled}
 _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 _HYPERSONIC_DISPATCH_EVENT = Event()
 _HYPERSONIC_DISPATCHER_STARTED = False
@@ -126,11 +136,58 @@ _DEFAULT_HYPERSONIC_FALLBACK_SUITES = [
 ]
 
 
+def _normalize_hypersonic_exec_container_name(
+    value: str | None,
+    *,
+    error_code: str,
+    status_code: int,
+) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return ""
+    if not _CONTAINER_NAME_RE.fullmatch(normalized):
+        raise AppError(error_code, "HYPERSONIC_EXEC_CONTAINER_NAME 非法", status_code=status_code)
+    return normalized
+
+
+def _build_hypersonic_exec_note(live_enabled: bool, exec_container_name: str) -> str:
+    if exec_container_name:
+        if live_enabled:
+            return f"执行入口：SSH + docker exec（固定容器：{exec_container_name}）"
+        return f"执行入口：本机 docker exec（固定容器：{exec_container_name}）"
+
+    if live_enabled:
+        return "执行入口：SSH + docker run（每测试套独立容器）"
+    return "执行入口：本机模式（需配置 HYPERSONIC_EXEC_CONTAINER_NAME）"
+
+
+def _serialize_hypersonic_runtime_settings() -> dict[str, Any]:
+    live_enabled = _is_hypersonic_live_enabled()
+    exec_container_name = _get_hypersonic_exec_container_name()
+    if exec_container_name:
+        execution_route = "ssh_exec" if live_enabled else "local_exec"
+    else:
+        execution_route = "ssh_run" if live_enabled else "local_config_error"
+
+    return {
+        "live_enabled": live_enabled,
+        "exec_container_name": exec_container_name,
+        "execution_route": execution_route,
+        "execution_note": _build_hypersonic_exec_note(live_enabled, exec_container_name),
+    }
+
+
 def _build_frameworks() -> dict[str, dict]:
     now = _now_iso()
     frigate_build_machine_ip = _SETTINGS.frigate_dynamic_build_machine_ip
     frigate_target_ip = _SETTINGS.frigate_dynamic_deploy_target_ip
     frigate_streamlit_url = _SETTINGS.frigate_dynamic_streamlit_url
+    hypersonic_live_enabled = _SETTINGS.hypersonic_live_enabled
+    hypersonic_exec_container = (_SETTINGS.hypersonic_exec_container_name or "").strip()
+    if hypersonic_exec_container and not _CONTAINER_NAME_RE.fullmatch(hypersonic_exec_container):
+        hypersonic_exec_note = "执行入口配置错误：HYPERSONIC_EXEC_CONTAINER_NAME 非法"
+    else:
+        hypersonic_exec_note = _build_hypersonic_exec_note(hypersonic_live_enabled, hypersonic_exec_container)
 
     return {
         "frigateDynamic": {
@@ -215,7 +272,7 @@ def _build_frameworks() -> dict[str, dict]:
             "build_machine": {
                 "name": "功能测试执行机",
                 "ip": _SETTINGS.hypersonic_ssh_host,
-                "note": "执行入口：SSH + docker run（每测试套独立容器）",
+                "note": hypersonic_exec_note,
             },
             "deploy_target": {
                 "name": "被测服务入口",
@@ -253,6 +310,82 @@ def _is_frigate_live_enabled() -> bool:
 
 def _is_hypersonic_live_enabled() -> bool:
     return _SETTINGS.hypersonic_live_enabled
+
+
+def _get_hypersonic_exec_container_name() -> str:
+    return _normalize_hypersonic_exec_container_name(
+        _SETTINGS.hypersonic_exec_container_name,
+        error_code="CONFIG_ERROR",
+        status_code=500,
+    )
+
+
+def _is_hypersonic_exec_enabled() -> bool:
+    return bool(_get_hypersonic_exec_container_name())
+
+
+def _hypersonic_exec_pid_file(run_id: str) -> str:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id.lower())
+    return f"/tmp/qms-hypersonic-{safe_run_id}.pid"
+
+
+def _build_hypersonic_exec_command(container_name: str, inner_cmd: str, run_id: str) -> str:
+    pid_file = _hypersonic_exec_pid_file(run_id)
+    wrapped_cmd = "\n".join(
+        [
+            "set -e",
+            f"pid_file={shell_quote(pid_file)}",
+            f"setsid bash -lc {shell_quote(inner_cmd)} &",
+            "worker_pid=$!",
+            "echo \"$worker_pid\" > \"$pid_file\"",
+            "cleanup() { rm -f \"$pid_file\"; }",
+            "trap cleanup EXIT",
+            "wait \"$worker_pid\"",
+        ]
+    )
+    return " ".join(
+        [
+            "docker exec",
+            shell_quote(container_name),
+            "bash -lc",
+            shell_quote(wrapped_cmd),
+        ]
+    )
+
+
+def _build_hypersonic_exec_stop_command(container_name: str, run_id: str) -> str:
+    pid_file = _hypersonic_exec_pid_file(run_id)
+    stop_inner = "\n".join(
+        [
+            f"pid_file={shell_quote(pid_file)}",
+            "if [ -f \"$pid_file\" ]; then",
+            "  pid=$(cat \"$pid_file\" 2>/dev/null || true)",
+            "  if [ -n \"$pid\" ] && [ \"$pid\" -eq \"$pid\" ] 2>/dev/null; then",
+            "    kill -TERM -\"$pid\" >/dev/null 2>&1 || kill -TERM \"$pid\" >/dev/null 2>&1 || true",
+            "  fi",
+            "  rm -f \"$pid_file\"",
+            "fi",
+            "true",
+        ]
+    )
+    return " ".join(
+        [
+            "docker exec",
+            shell_quote(container_name),
+            "bash -lc",
+            shell_quote(stop_inner),
+        ]
+    )
+
+
+def _is_hypersonic_exec_mode_run(run: AutomationRun) -> bool:
+    meta = run.meta_json if isinstance(run.meta_json, dict) else {}
+    exec_container = str(meta.get("exec_container_name") or "").strip()
+    if exec_container:
+        return True
+
+    configured = _get_hypersonic_exec_container_name()
+    return bool(configured and run.container_name == configured)
 
 
 def _connect_frigate_ssh() -> paramiko.SSHClient:
@@ -605,7 +738,7 @@ def _serialize_suite(row: AutomationSuite) -> dict:
 
 
 def _build_hypersonic_framework(db: Session) -> dict:
-    template = deepcopy(_FRAMEWORKS["hypersonic"])
+    template = deepcopy(_build_frameworks()["hypersonic"])
     configs = (
         db.query(AutomationConfiguration)
         .filter(AutomationConfiguration.framework_key == "hypersonic")
@@ -644,16 +777,24 @@ def _generate_hypersonic_run_id(db: Session) -> str:
 
 
 def _append_hypersonic_log(db: Session, run: AutomationRun, message: str) -> None:
-    run.log_cursor += 1
+    next_seq = db.execute(
+        text("UPDATE automation_run SET log_cursor = log_cursor + 1 WHERE id = :run_id RETURNING log_cursor"),
+        {"run_id": run.id},
+    ).scalar_one_or_none()
+    if next_seq is None:
+        return
+
+    next_seq = int(next_seq)
+    run.log_cursor = next_seq
     db.add(
         AutomationRunLog(
             run_id=run.id,
-            seq=run.log_cursor,
+            seq=next_seq,
             line=message,
         )
     )
-    if run.log_cursor > _MAX_RUN_LOG_LINES:
-        cutoff = run.log_cursor - _MAX_RUN_LOG_LINES
+    if next_seq > _MAX_RUN_LOG_LINES:
+        cutoff = next_seq - _MAX_RUN_LOG_LINES
         db.query(AutomationRunLog).filter(
             AutomationRunLog.run_id == run.id,
             AutomationRunLog.seq <= cutoff,
@@ -694,6 +835,20 @@ def _run_ssh_wait(client: paramiko.SSHClient, command: str, *, get_pty: bool = F
     out = stdout.read().decode("utf-8", errors="replace").strip()
     err = stderr.read().decode("utf-8", errors="replace").strip()
     return exit_code, out, err
+
+
+def _run_local_wait(command: str) -> tuple[int, str, str]:
+    proc = subprocess.run(["bash", "-lc", command], capture_output=True, text=True)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _ensure_local_docker_available() -> None:
+    if shutil.which("docker") is None:
+        raise AppError("CONFIG_ERROR", "本地执行模式需要 docker 命令，请安装 docker cli", status_code=500)
+
+    code, out, err = _run_local_wait("docker version --format '{{.Server.Version}}'")
+    if code != 0:
+        raise AppError("UPSTREAM_ERROR", f"本地 Docker 不可用: {err or out}", status_code=502)
 
 
 def _validate_path_segment(value: str, field_name: str) -> str:
@@ -1016,7 +1171,12 @@ def _build_hypersonic_selection(suite: AutomationSuite) -> list[str]:
     return _build_testpaths(suite.module_name or "", suite.path_expr or ".")
 
 
-def _build_hypersonic_inner_command(config: dict[str, Any], testpaths: list[str]) -> str:
+def _build_hypersonic_inner_command(
+    config: dict[str, Any],
+    testpaths: list[str],
+    *,
+    allure_dir: str = "/workspace/qms-run/allure",
+) -> str:
     args: list[str] = [_SETTINGS.hypersonic_remote_python_bin, "-m", "pytest"]
 
     extra_pytest_args = str(config.get("extra_pytest_args") or "").strip()
@@ -1028,7 +1188,7 @@ def _build_hypersonic_inner_command(config: dict[str, Any], testpaths: list[str]
     else:
         args.extend(["-s", "-vv", "--show-capture=no"])
 
-    args.extend(["--alluredir=/workspace/qms-run/allure", "--clean-alluredir"])
+    args.extend([f"--alluredir={allure_dir}", "--clean-alluredir"])
     args.extend(["--log", str(config.get("log", "FAILED"))])
 
     if _parse_bool(config.get("data"), default=False):
@@ -1063,7 +1223,7 @@ def _build_hypersonic_inner_command(config: dict[str, Any], testpaths: list[str]
             "set -e",
             "export PYTHONIOENCODING=utf-8",
             "cd /workspace/hypersonic",
-            "mkdir -p /workspace/qms-run/allure",
+            f"mkdir -p {shell_quote(allure_dir)}",
             run_block,
         ]
     )
@@ -1124,6 +1284,48 @@ def _collect_report_archive(client: paramiko.SSHClient, db: Session, run: Automa
     _append_hypersonic_log(db, run, f"[system] 报告已归档: {run.report_archive_path}")
 
 
+def _collect_report_archive_local(db: Session, run: AutomationRun) -> None:
+    if not run.remote_run_dir or not run.container_name:
+        return
+
+    remote_dir = run.remote_run_dir.rstrip("/")
+    remote_allure_dir = f"{remote_dir}/allure"
+    archive_name = f"allure-{run.run_id}.tar.gz"
+    remote_archive = f"{remote_dir}/{archive_name}"
+
+    archive_inner = (
+        f"if [ -d {shell_quote(remote_allure_dir)} ] && [ \"$(ls -A {shell_quote(remote_allure_dir)})\" ]; "
+        f"then tar -czf {shell_quote(remote_archive)} -C {shell_quote(remote_dir)} allure; fi"
+    )
+    archive_cmd = (
+        f"docker exec {shell_quote(run.container_name)} "
+        f"bash -lc {shell_quote(archive_inner)}"
+    )
+    _run_local_wait(archive_cmd)
+
+    exists_cmd = (
+        f"docker exec {shell_quote(run.container_name)} "
+        f"bash -lc {shell_quote(f'test -f {shell_quote(remote_archive)}')}"
+    )
+    code, _, _ = _run_local_wait(exists_cmd)
+    if code != 0:
+        return
+
+    local_rel = Path("automation") / "hypersonic" / run.run_id / archive_name
+    local_abs = _SETTINGS.upload_path / local_rel
+    local_abs.parent.mkdir(parents=True, exist_ok=True)
+
+    copy_cmd = f"docker cp {shell_quote(f'{run.container_name}:{remote_archive}')} {shell_quote(str(local_abs))}"
+    code, out, err = _run_local_wait(copy_cmd)
+    if code != 0:
+        _append_hypersonic_log(db, run, f"[system] 报告下载失败: {err or out}")
+        return
+
+    public_prefix = _SETTINGS.upload_public_prefix.rstrip("/")
+    run.report_archive_path = f"{public_prefix}/{local_rel.as_posix()}"
+    _append_hypersonic_log(db, run, f"[system] 报告已归档: {run.report_archive_path}")
+
+
 def _dispatch_hypersonic_pending_runs() -> None:
     _HYPERSONIC_DISPATCH_EVENT.set()
 
@@ -1154,6 +1356,18 @@ def _recover_hypersonic_runs(db: Session) -> None:
         for run in rows:
             if run.status == AutomationRunStatus.running:
                 _set_run_terminal(db, run, AutomationRunStatus.failed, "[system] 服务重启，任务被中断")
+        db.flush()
+        return
+
+    if _is_hypersonic_exec_enabled():
+        for run in rows:
+            if run.status == AutomationRunStatus.running:
+                _set_run_terminal(
+                    db,
+                    run,
+                    AutomationRunStatus.failed,
+                    "[system] 服务重启，docker exec 模式任务无法恢复，已标记失败",
+                )
         db.flush()
         return
 
@@ -1199,6 +1413,7 @@ def _ensure_hypersonic_runtime(db: Session) -> None:
         if not _HYPERSONIC_RECOVERED:
             _recover_hypersonic_runs(db)
             _HYPERSONIC_RECOVERED = True
+        db.commit()
 
     _dispatch_hypersonic_pending_runs()
 
@@ -1218,6 +1433,8 @@ def _dispatch_hypersonic_once() -> None:
     db = SessionLocal()
     try:
         max_parallel = max(1, int(_SETTINGS.hypersonic_max_parallel))
+        if _is_hypersonic_exec_enabled():
+            max_parallel = 1
 
         while True:
             running_count = (
@@ -1258,6 +1475,7 @@ def _dispatch_hypersonic_once() -> None:
 def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
     db = SessionLocal()
     client = None
+    local_proc = None
     try:
         run = db.query(AutomationRun).filter(AutomationRun.run_id == run_id).first()
         if run is None:
@@ -1288,64 +1506,155 @@ def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
 
         parsed_cfg = _parse_hypersonic_configuration(cfg.content)
         timeout_sec = int(parsed_cfg.get("timeout_sec", _SETTINGS.hypersonic_default_timeout_sec))
+        live_mode = _is_hypersonic_live_enabled()
+        local_mode = not live_mode
 
-        if not _is_hypersonic_live_enabled():
-            _append_hypersonic_log(db, run, "[system] HYPERSONIC_LIVE_ENABLED=false，进入本地占位执行")
-            _append_hypersonic_log(db, run, f"[functional_test] 配置={cfg.config_key} 套件={suite.suite_key}")
-            if _is_cancel_requested(db, run):
-                _set_run_terminal(db, run, AutomationRunStatus.canceled, "[system] 任务已取消")
+        exec_container_name = _get_hypersonic_exec_container_name()
+        exec_mode = bool(exec_container_name)
+        if local_mode:
+            if not exec_mode:
+                _set_run_terminal(
+                    db,
+                    run,
+                    AutomationRunStatus.failed,
+                    "[system] 本地模式未配置 HYPERSONIC_EXEC_CONTAINER_NAME，无法执行任务",
+                )
+                db.commit()
+                return
+            _ensure_local_docker_available()
+
+        if exec_mode:
+            if live_mode:
+                run_remote_dir = f"{_SETTINGS.hypersonic_remote_repo_dir.rstrip('/')}/.qms-run/{run.run_id}"
             else:
-                _set_run_terminal(db, run, AutomationRunStatus.success, "[system] 占位任务执行完成")
+                run_remote_dir = f"/workspace/hypersonic/.qms-run/{run.run_id}"
+            allure_dir = f"/workspace/hypersonic/.qms-run/{run.run_id}/allure"
+        else:
+            run_remote_dir = f"{_SETTINGS.hypersonic_remote_base_dir.rstrip('/')}/{run.run_id}"
+            allure_dir = "/workspace/qms-run/allure"
+
+        testpaths = _build_hypersonic_selection(suite)
+        inner_cmd = _build_hypersonic_inner_command(parsed_cfg, testpaths, allure_dir=allure_dir)
+
+        if live_mode:
+            client = _connect_hypersonic_ssh()
+
+        def _wait_cmd(command: str) -> tuple[int, str, str]:
+            if live_mode:
+                return _run_ssh_wait(client, command)  # type: ignore[arg-type]
+            return _run_local_wait(command)
+
+        stream_cmd = ""
+
+        if exec_mode and recover_existing:
+            _set_run_terminal(
+                db,
+                run,
+                AutomationRunStatus.failed,
+                "[system] docker exec 模式不支持服务重启后恢复任务",
+            )
             db.commit()
             return
 
-        testpaths = _build_hypersonic_selection(suite)
-        inner_cmd = _build_hypersonic_inner_command(parsed_cfg, testpaths)
-
-        client = _connect_hypersonic_ssh()
         if not recover_existing:
-            run.container_name = _format_hypersonic_container_name(run.run_id)
-            run.remote_run_dir = f"{_SETTINGS.hypersonic_remote_base_dir.rstrip('/')}/{run.run_id}"
+            run.container_name = exec_container_name if exec_mode else _format_hypersonic_container_name(run.run_id)
+            run.remote_run_dir = run_remote_dir
+            if exec_mode:
+                if live_mode:
+                    _append_hypersonic_log(db, run, "[system] 已启用 docker exec 模式")
+                else:
+                    _append_hypersonic_log(db, run, "[system] 已启用本地 docker exec 模式")
             _append_hypersonic_log(db, run, f"[system] 容器名: {run.container_name}")
             _append_hypersonic_log(db, run, f"[system] 远端运行目录: {run.remote_run_dir}")
             db.commit()
 
-            prep_cmd = f"mkdir -p {shell_quote(run.remote_run_dir)}"
-            code, _, err = _run_ssh_wait(client, prep_cmd)
-            if code != 0:
-                raise AppError("UPSTREAM_ERROR", f"创建远端目录失败: {err}", status_code=502)
+            if exec_mode:
+                if live_mode:
+                    prep_cmd = f"mkdir -p {shell_quote(run.remote_run_dir)}"
+                else:
+                    prep_inner = f"mkdir -p {shell_quote(run.remote_run_dir)}"
+                    prep_cmd = (
+                        f"docker exec {shell_quote(run.container_name)} "
+                        f"bash -lc {shell_quote(prep_inner)}"
+                    )
+                code, _, err = _wait_cmd(prep_cmd)
+                if code != 0:
+                    _append_hypersonic_log(
+                        db,
+                        run,
+                        f"[system] 警告: 无法创建报告目录（{run.remote_run_dir}），可能无法回传报告: {err}",
+                    )
+                    db.commit()
 
-            clean_cmd = f"docker rm -f {shell_quote(run.container_name)} >/dev/null 2>&1 || true"
-            _run_ssh_wait(client, clean_cmd)
+                code, out, err = _wait_cmd(
+                    f"docker inspect -f '{{{{.State.Running}}}}' {shell_quote(run.container_name)}",
+                )
+                if code != 0 or out.strip().lower() != "true":
+                    raise AppError(
+                        "UPSTREAM_ERROR",
+                        f"docker exec 目标容器不可用: {err or out or run.container_name}",
+                        status_code=502,
+                    )
 
-            run_cmd = " ".join(
-                [
-                    "docker run -d",
-                    f"--name {shell_quote(run.container_name)}",
-                    f"-v {shell_quote(_SETTINGS.hypersonic_remote_repo_dir)}:/workspace/hypersonic",
-                    f"-v {shell_quote(run.remote_run_dir)}:/workspace/qms-run",
-                    "-w /workspace/hypersonic",
-                    shell_quote(_SETTINGS.hypersonic_runner_image),
-                    "bash -lc",
-                    shell_quote(inner_cmd),
-                ]
-            )
-            _append_hypersonic_log(db, run, f"[system] 远端启动命令: {run_cmd}")
-            db.commit()
-
-            code, out, err = _run_ssh_wait(client, run_cmd)
-            if code != 0:
-                raise AppError("UPSTREAM_ERROR", f"docker run 启动失败: {err or out}", status_code=502)
-            if out.strip():
-                _append_hypersonic_log(db, run, f"[system] 容器启动成功: {out.strip()[:80]}")
+                stream_cmd = _build_hypersonic_exec_command(run.container_name, inner_cmd, run.run_id)
+                if live_mode:
+                    _append_hypersonic_log(db, run, f"[system] 远端执行命令: {stream_cmd}")
+                else:
+                    _append_hypersonic_log(db, run, f"[system] 本地执行命令: {stream_cmd}")
                 db.commit()
+            else:
+                prep_cmd = f"mkdir -p {shell_quote(run.remote_run_dir)}"
+                code, _, err = _wait_cmd(prep_cmd)
+                if code != 0:
+                    raise AppError("UPSTREAM_ERROR", f"创建远端目录失败: {err}", status_code=502)
+
+                clean_cmd = f"docker rm -f {shell_quote(run.container_name)} >/dev/null 2>&1 || true"
+                _wait_cmd(clean_cmd)
+
+                run_cmd = " ".join(
+                    [
+                        "docker run -d",
+                        f"--name {shell_quote(run.container_name)}",
+                        f"-v {shell_quote(_SETTINGS.hypersonic_remote_repo_dir)}:/workspace/hypersonic",
+                        f"-v {shell_quote(run.remote_run_dir)}:/workspace/qms-run",
+                        "-w /workspace/hypersonic",
+                        shell_quote(_SETTINGS.hypersonic_runner_image),
+                        "bash -lc",
+                        shell_quote(inner_cmd),
+                    ]
+                )
+                _append_hypersonic_log(db, run, f"[system] 远端启动命令: {run_cmd}")
+                db.commit()
+
+                code, out, err = _wait_cmd(run_cmd)
+                if code != 0:
+                    raise AppError("UPSTREAM_ERROR", f"docker run 启动失败: {err or out}", status_code=502)
+                if out.strip():
+                    _append_hypersonic_log(db, run, f"[system] 容器启动成功: {out.strip()[:80]}")
+                    db.commit()
+                stream_cmd = f"docker logs -f {shell_quote(run.container_name)}"
         else:
+            if not run.container_name:
+                raise AppError("UPSTREAM_ERROR", "缺少容器信息，无法恢复任务", status_code=502)
             _append_hypersonic_log(db, run, "[system] 重新接管已有容器日志")
             db.commit()
+            stream_cmd = f"docker logs -f {shell_quote(run.container_name)}"
 
-        logs_cmd = f"docker logs -f {shell_quote(run.container_name)}"
-        _, stdout, stderr = client.exec_command(logs_cmd, get_pty=True)
-        channel = stdout.channel
+        channel = None
+        streams: list[Any] = []
+        if live_mode:
+            _, stdout, stderr = client.exec_command(stream_cmd, get_pty=True)  # type: ignore[union-attr]
+            channel = stdout.channel
+        else:
+            local_proc = subprocess.Popen(
+                ["bash", "-lc", stream_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if local_proc.stdout is None or local_proc.stderr is None:
+                raise AppError("UPSTREAM_ERROR", "本地执行启动失败", status_code=502)
+            streams = [local_proc.stdout, local_proc.stderr]
+
         buffer = ""
         start_at = monotonic()
         timeout_triggered = False
@@ -1354,12 +1663,24 @@ def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
 
         while True:
             had_data = False
-            if channel.recv_ready():
-                had_data = True
-                buffer += channel.recv(4096).decode("utf-8", errors="replace")
-            if channel.recv_stderr_ready():
-                had_data = True
-                buffer += channel.recv_stderr(4096).decode("utf-8", errors="replace")
+            if live_mode:
+                if channel.recv_ready():  # type: ignore[union-attr]
+                    had_data = True
+                    buffer += channel.recv(4096).decode("utf-8", errors="replace")  # type: ignore[union-attr]
+                if channel.recv_stderr_ready():  # type: ignore[union-attr]
+                    had_data = True
+                    buffer += channel.recv_stderr(4096).decode("utf-8", errors="replace")  # type: ignore[union-attr]
+            else:
+                if streams:
+                    ready, _, _ = select.select(streams, [], [], 0.2)
+                    for stream in ready:
+                        chunk = os.read(stream.fileno(), 4096)
+                        if chunk:
+                            had_data = True
+                            buffer += chunk.decode("utf-8", errors="replace")
+                        else:
+                            if stream in streams:
+                                streams.remove(stream)
 
             buffer = buffer.replace("\r", "\n")
             while "\n" in buffer:
@@ -1372,39 +1693,73 @@ def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
             now = monotonic()
             if not timeout_triggered and now - start_at > timeout_sec:
                 timeout_triggered = True
-                _append_hypersonic_log(db, run, f"[system] 任务超时（>{timeout_sec}s），准备停止容器")
+                if exec_mode:
+                    _append_hypersonic_log(db, run, f"[system] 任务超时（>{timeout_sec}s），准备停止测试进程")
+                else:
+                    _append_hypersonic_log(db, run, f"[system] 任务超时（>{timeout_sec}s），准备停止容器")
                 db.commit()
-                _run_ssh_wait(client, f"docker stop {shell_quote(run.container_name)}")
+                if exec_mode:
+                    stop_cmd = _build_hypersonic_exec_stop_command(run.container_name, run.run_id)
+                else:
+                    stop_cmd = f"docker stop {shell_quote(run.container_name)}"
+                _wait_cmd(stop_cmd)
                 stop_sent = True
 
             if now - last_cancel_check >= 1.0:
                 if _is_cancel_requested(db, run) and not stop_sent:
-                    _append_hypersonic_log(db, run, "[system] 收到取消请求，准备停止容器")
+                    if exec_mode:
+                        _append_hypersonic_log(db, run, "[system] 收到取消请求，准备停止测试进程")
+                    else:
+                        _append_hypersonic_log(db, run, "[system] 收到取消请求，准备停止容器")
                     db.commit()
-                    _run_ssh_wait(client, f"docker stop {shell_quote(run.container_name)}")
+                    if exec_mode:
+                        stop_cmd = _build_hypersonic_exec_stop_command(run.container_name, run.run_id)
+                    else:
+                        stop_cmd = f"docker stop {shell_quote(run.container_name)}"
+                    _wait_cmd(stop_cmd)
                     stop_sent = True
                 last_cancel_check = now
 
-            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
-                break
-
-            if not had_data:
-                sleep(0.2)
+            if live_mode:
+                if (
+                    channel.exit_status_ready()  # type: ignore[union-attr]
+                    and not channel.recv_ready()  # type: ignore[union-attr]
+                    and not channel.recv_stderr_ready()  # type: ignore[union-attr]
+                ):
+                    break
+                if not had_data:
+                    sleep(0.2)
+            else:
+                if local_proc.poll() is not None and not streams:
+                    break
 
         tail = buffer.strip()
         if tail:
             _append_hypersonic_log(db, run, tail)
             db.commit()
 
-        wait_code, wait_out, _ = _run_ssh_wait(client, f"docker wait {shell_quote(run.container_name)}")
         exit_code = -1
-        if wait_code == 0 and wait_out:
-            try:
-                exit_code = int(wait_out.splitlines()[-1].strip())
-            except Exception:
-                exit_code = -1
+        if live_mode:
+            if exec_mode:
+                exit_code = channel.recv_exit_status()  # type: ignore[union-attr]
+            else:
+                wait_code, wait_out, _ = _wait_cmd(f"docker wait {shell_quote(run.container_name)}")
+                if wait_code == 0 and wait_out:
+                    try:
+                        exit_code = int(wait_out.splitlines()[-1].strip())
+                    except Exception:
+                        exit_code = -1
 
-        _run_ssh_wait(client, f"docker rm -f {shell_quote(run.container_name)} >/dev/null 2>&1 || true")
+                _wait_cmd(f"docker rm -f {shell_quote(run.container_name)} >/dev/null 2>&1 || true")
+        else:
+            if local_proc.poll() is None:
+                try:
+                    local_proc.wait(timeout=1)
+                except Exception:
+                    pass
+            exit_code = int(local_proc.returncode or 0)
+            if not exec_mode:
+                _wait_cmd(f"docker rm -f {shell_quote(run.container_name)} >/dev/null 2>&1 || true")
 
         if _is_cancel_requested(db, run):
             _set_run_terminal(db, run, AutomationRunStatus.canceled, "[system] 任务已取消")
@@ -1415,7 +1770,10 @@ def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
         else:
             _set_run_terminal(db, run, AutomationRunStatus.failed, f"[system] 任务执行失败，退出码: {exit_code}")
 
-        _collect_report_archive(client, db, run)
+        if live_mode:
+            _collect_report_archive(client, db, run)  # type: ignore[arg-type]
+        else:
+            _collect_report_archive_local(db, run)
         db.commit()
     except AppError as exc:
         run = db.query(AutomationRun).filter(AutomationRun.run_id == run_id).first()
@@ -1428,6 +1786,8 @@ def _execute_hypersonic_run(run_id: str, recover_existing: bool) -> None:
             _set_run_terminal(db, run, AutomationRunStatus.failed, f"[system] 执行异常: {exc}")
             db.commit()
     finally:
+        if local_proc is not None and local_proc.poll() is None:
+            local_proc.kill()
         if client is not None:
             client.close()
         db.close()
@@ -1469,19 +1829,34 @@ def _serialize_log_chunk_for_hypersonic_run(
     }
 
 
-def _request_stop_remote_container(container_name: str) -> tuple[bool, str]:
-    client = None
+def _request_stop_remote_container(container_name: str, *, run_id: str | None = None) -> tuple[bool, str]:
+    if run_id:
+        stop_cmd = _build_hypersonic_exec_stop_command(container_name, run_id)
+    else:
+        stop_cmd = f"docker stop {shell_quote(container_name)}"
+
+    if _is_hypersonic_live_enabled():
+        client = None
+        try:
+            client = _connect_hypersonic_ssh()
+            code, out, err = _run_ssh_wait(client, stop_cmd)
+            if code == 0:
+                return True, out or ""
+            return False, err or out or ""
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            if client is not None:
+                client.close()
+
     try:
-        client = _connect_hypersonic_ssh()
-        code, out, err = _run_ssh_wait(client, f"docker stop {shell_quote(container_name)}")
+        _ensure_local_docker_available()
+        code, out, err = _run_local_wait(stop_cmd)
         if code == 0:
             return True, out or ""
         return False, err or out or ""
     except Exception as exc:
         return False, str(exc)
-    finally:
-        if client is not None:
-            client.close()
 
 
 @router.get("/frameworks/{framework_key}")
@@ -1688,6 +2063,55 @@ def sync_hypersonic_suites(
     return success_response(request, {"framework": deepcopy(framework), "summary": summary})
 
 
+@router.get("/frameworks/hypersonic/runtime")
+def get_hypersonic_runtime(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: UserAccount = Depends(get_current_user),
+):
+    with _LOCK:
+        _ensure_hypersonic_runtime(db)
+        payload = _serialize_hypersonic_runtime_settings()
+    return success_response(request, payload)
+
+
+@router.put("/frameworks/hypersonic/runtime")
+def update_hypersonic_runtime(
+    payload: UpdateHypersonicRuntimeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    _require_editor(current_user)
+
+    exec_container_name = _normalize_hypersonic_exec_container_name(
+        payload.exec_container_name,
+        error_code="VALIDATION_ERROR",
+        status_code=422,
+    )
+
+    with _LOCK:
+        _ensure_hypersonic_runtime(db)
+        _SETTINGS.hypersonic_live_enabled = bool(payload.live_enabled)
+        _SETTINGS.hypersonic_exec_container_name = exec_container_name
+        runtime_payload = _serialize_hypersonic_runtime_settings()
+        framework = _build_hypersonic_framework(db)
+
+    write_audit(
+        db,
+        current_user.id,
+        action="automation.hypersonic.runtime.update",
+        object_type="automation_framework",
+        object_id="hypersonic",
+        diff={
+            "live_enabled": runtime_payload["live_enabled"],
+            "exec_container_name": runtime_payload["exec_container_name"],
+        },
+    )
+    db.commit()
+    return success_response(request, {"runtime": runtime_payload, "framework": deepcopy(framework)})
+
+
 @router.post("/frameworks/{framework_key}/runs")
 def trigger_automation_run(
     framework_key: str,
@@ -1747,6 +2171,7 @@ def trigger_automation_run(
                     "source": "web",
                     "suite_source_type": suite.source_type,
                     "live_enabled": _is_hypersonic_live_enabled(),
+                    "exec_container_name": _get_hypersonic_exec_container_name() or None,
                 },
             )
             db.add(run)
@@ -1913,13 +2338,23 @@ def cancel_automation_run(
             payload = _serialize_hypersonic_run(db, run, include_logs=True)
         else:
             run.cancel_requested = True
-            _append_hypersonic_log(db, run, "[system] 已收到取消请求，正在停止容器")
-            if _is_hypersonic_live_enabled() and run.container_name:
-                ok, detail = _request_stop_remote_container(run.container_name)
+            exec_mode = _is_hypersonic_exec_mode_run(run)
+            if exec_mode:
+                _append_hypersonic_log(db, run, "[system] 已收到取消请求，正在停止测试进程")
+            else:
+                _append_hypersonic_log(db, run, "[system] 已收到取消请求，正在停止容器")
+            if run.container_name:
+                ok, detail = _request_stop_remote_container(
+                    run.container_name,
+                    run_id=run.run_id if exec_mode else None,
+                )
                 if ok:
-                    _append_hypersonic_log(db, run, "[system] 已发送 docker stop")
+                    if exec_mode:
+                        _append_hypersonic_log(db, run, "[system] 已发送 docker exec stop")
+                    else:
+                        _append_hypersonic_log(db, run, "[system] 已发送 docker stop")
                 else:
-                    _append_hypersonic_log(db, run, f"[system] 停止容器失败: {detail}")
+                    _append_hypersonic_log(db, run, f"[system] 停止任务失败: {detail}")
             elif not _is_hypersonic_live_enabled():
                 _set_run_terminal(db, run, AutomationRunStatus.canceled, "[system] 任务已取消")
             payload = _serialize_hypersonic_run(db, run, include_logs=True)

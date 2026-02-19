@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { getIssueStatusGroup, statusMatchesGroup } from '../../domain/status';
 import type {
   AutomationFramework,
+  AutomationHypersonicRuntimeSettings,
   AutomationRunLogChunk,
   AutomationRun,
   AutomationRunStatus,
@@ -66,6 +67,45 @@ export class MockRepositoryError extends Error {
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function buildHypersonicRuntimeSettings(
+  liveEnabled: boolean,
+  execContainerName: string,
+): AutomationHypersonicRuntimeSettings {
+  const containerName = execContainerName.trim();
+  if (containerName) {
+    if (liveEnabled) {
+      return {
+        liveEnabled,
+        execContainerName: containerName,
+        executionRoute: 'ssh_exec',
+        executionNote: `执行入口：SSH + docker exec（固定容器：${containerName}）`,
+      };
+    }
+    return {
+      liveEnabled,
+      execContainerName: containerName,
+      executionRoute: 'local_exec',
+      executionNote: `执行入口：本机 docker exec（固定容器：${containerName}）`,
+    };
+  }
+
+  if (liveEnabled) {
+    return {
+      liveEnabled,
+      execContainerName: '',
+      executionRoute: 'ssh_run',
+      executionNote: '执行入口：SSH + docker run（每测试套独立容器）',
+    };
+  }
+
+  return {
+    liveEnabled,
+    execContainerName: '',
+    executionRoute: 'local_config_error',
+    executionNote: '执行入口：本机模式（需配置 HYPERSONIC_EXEC_CONTAINER_NAME）',
+  };
 }
 
 function toModuleGroups(cases: CaseWithStatus[]): ModuleCaseGroup[] {
@@ -160,7 +200,16 @@ export class MockRepository implements Repository {
 
   constructor(initialState?: MockDatabase) {
     this.state = deepClone(initialState ?? createInitialMockDatabase());
+    this.syncHypersonicRuntimeToFramework();
     this.bootstrapExecutionData();
+  }
+
+  private syncHypersonicRuntimeToFramework(): void {
+    const framework = this.state.automationFrameworks.find((item) => item.frameworkKey === 'hypersonic');
+    if (!framework) {
+      return;
+    }
+    framework.buildMachine.note = this.state.hypersonicRuntimeSettings.executionNote;
   }
 
   private bootstrapExecutionData(): void {
@@ -1413,6 +1462,19 @@ export class MockRepository implements Repository {
 
   async getAutomationFramework(frameworkKey: string): Promise<AutomationFramework> {
     return deepClone(this.getAutomationFrameworkState(frameworkKey));
+  }
+
+  async getHypersonicRuntimeSettings(): Promise<AutomationHypersonicRuntimeSettings> {
+    return deepClone(this.state.hypersonicRuntimeSettings);
+  }
+
+  async updateHypersonicRuntimeSettings(
+    payload: Pick<AutomationHypersonicRuntimeSettings, 'liveEnabled' | 'execContainerName'>,
+  ): Promise<AutomationHypersonicRuntimeSettings> {
+    const updated = buildHypersonicRuntimeSettings(payload.liveEnabled, payload.execContainerName);
+    this.state.hypersonicRuntimeSettings = updated;
+    this.syncHypersonicRuntimeToFramework();
+    return deepClone(updated);
   }
 
   async listAutomationRuns(frameworkKey: string): Promise<AutomationRun[]> {

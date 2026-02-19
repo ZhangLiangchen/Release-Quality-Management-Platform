@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     hypersonic_remote_base_dir: str = "/workspace/qms-hypersonic-runs"
     hypersonic_remote_repo_dir: str = "/workspace/hypersonic"
     hypersonic_remote_python_bin: str = "python3"
+    hypersonic_exec_container_name: str = ""
     hypersonic_ci_list_path: str = (
         "/Users/zhangliangchen/PycharmProjects/hypersonic-dev/hypersonic/scripts/ci_list.json"
     )
